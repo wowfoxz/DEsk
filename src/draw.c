@@ -2895,6 +2895,147 @@ static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank,
 	m->rough = clampf(m->rough + grime * 0.16, 0.05, 1.0);
 }
 
+/* NO FATE. Somebody sat at this desk with a knife one night and cut it into
+ * the top, the way Sarah Connor cut it into the picnic table: two lines of
+ * rough capitals, each stroke two passes of the blade that do not
+ * quite land on each other, a V in the wood with the raw timber showing
+ * pale inside, the fibres torn up along the grain at the edges. It is in
+ * the board, not on it: the walls of the V turn the normal so the lamp
+ * lights one side and not the other, and the raw wood takes the room's
+ * light like the rest of the top. Laid out in letter units (a capital is
+ * 1 high), slanted, at the near left of the top, clear of the drawer's
+ * opening and of where windows open. carve_field gives the distance from
+ * the nearest cut in half widths (r < 1 is inside the groove) and the
+ * slope of the wall there, in world x and z. */
+#define CARVE_N 23
+#define CARVE_S 1.05
+static const double CARVE_SEG[CARVE_N][4] = {
+	{ 0.06, -0.02, 0.10, 1.00 },
+	{ 0.10, 1.00, 0.60, 0.10 },
+	{ 0.60, 0.10, 0.66, 1.04 },
+	{ 1.127, 0.974, 0.886, 0.762 },
+	{ 0.886, 0.762, 0.893, 0.389 },
+	{ 0.893, 0.389, 1.05, 0.084 },
+	{ 1.05, 0.084, 1.334, 0.089 },
+	{ 1.334, 0.089, 1.572, 0.305 },
+	{ 1.572, 0.305, 1.533, 0.677 },
+	{ 1.533, 0.677, 1.363, 0.961 },
+	{ 1.363, 0.961, 1.075, 0.966 },
+	{ -0.62, -1.57, -0.57, -0.45 },
+	{ -0.59, -0.45, 0.02, -0.35 },
+	{ -0.59, -1.01, -0.14, -0.95 },
+	{ 0.12, -1.53, 0.42, -0.42 },
+	{ 0.42, -0.42, 0.76, -1.45 },
+	{ 0.25, -1.07, 0.64, -1.03 },
+	{ 0.86, -0.48, 1.48, -0.37 },
+	{ 1.17, -0.43, 1.22, -1.51 },
+	{ 1.62, -0.41, 1.72, -1.47 },
+	{ 1.60, -0.42, 2.16, -0.33 },
+	{ 1.67, -0.95, 2.03, -0.90 },
+	{ 1.72, -1.47, 2.28, -1.35 }
+};
+
+static double carve_field(vec3 w, double *tx, double *tz)
+{
+	*tx = *tz = 0.0;
+	double ang = 0.11, ca = cos(ang), sa = sin(ang);
+	double dx = w.x - (-10.9), dz = 4.40 - w.z;
+	double qx = (ca * dx - sa * dz) / CARVE_S, qy = (sa * dx + ca * dz) / CARVE_S;
+	if (qx < -1.0 || qx > 2.6 || qy < -1.9 || qy > 1.3) {
+		return 1e9;
+	}
+	double rag = 1.0 + 0.90 * (room_fbm2(w.x * 34.0 + 5.0, w.z * 4.0) - 0.5);
+	double best = 1e9, side = 1.0, bdx = 1.0, bdy = 0.0;
+	for (int i = 0; i < CARVE_N; i++) {
+		for (int k = 0; k < 2; k++) {
+			double fk = k, fi = i;
+			double ax = CARVE_SEG[i][0], ay = CARVE_SEG[i][1];
+			double bx = CARVE_SEG[i][2], by = CARVE_SEG[i][3];
+			double l0 = sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+			double d0x = (bx - ax) / l0, d0y = (by - ay) / l0;
+			double nx = -d0y, ny = d0x;
+			/* the second pass: the blade set down a little off the first */
+			double oa = (room_noise(fi * 3.1, 7.0 + fk) - 0.5) * 0.07 * fk;
+			double sa0 = room_noise(fi * 1.7, 3.0 + fk) * 0.06;
+			double ob = (room_noise(fi * 2.3, 9.0 + fk) - 0.5) * 0.07 * fk;
+			double sb = (room_noise(fi * 4.9, 5.0 + fk) - 0.4) * 0.08;
+			ax += nx * oa - d0x * sa0;
+			ay += ny * oa - d0y * sa0;
+			bx += nx * ob + d0x * sb;
+			by += ny * ob + d0y * sb;
+			double len = sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+			double dirx = (bx - ax) / len, diry = (by - ay) / len;
+			double pax = qx - ax, pay = qy - ay;
+			double h = clampf(pax * dirx + pay * diry, 0.0, len);
+			double e = dirx * pay - diry * pax;
+			/* the hand is not a ruler */
+			e += (room_noise(h * 7.0 + fi * 5.3, fk * 4.0 + 1.0) - 0.5) * 0.045;
+			double along = pax * dirx + pay * diry - h;
+			double hw = 0.052 * (1.0 - fk * 0.30)
+				* (0.45 + 0.55 * smoothstepf(0.0, 0.10, h))
+				* (0.20 + 0.80 * smoothstepf(len, len - 0.16, h))
+				* (0.80 + 0.40 * room_noise(h * 5.0 + fi, fk + 2.0)) * rag;
+			double r = sqrt(e * e + along * along) / hw;
+			if (r < best) {
+				best = r;
+				side = e < 0.0 ? -1.0 : 1.0;
+				bdx = dirx;
+				bdy = diry;
+			}
+		}
+	}
+	if (best > 1.6) {
+		return best;
+	}
+	/* inside, the wall falls towards the middle of the cut; just outside
+	 * it the torn fibres stand up a little the other way */
+	double s = best < 1.0 ? -1.25 * smoothstepf(0.0, 0.30, best)
+		: 0.30 * smoothstepf(1.6, 1.15, best);
+	double tlx = -bdy * side * s, tly = bdx * side * s;
+	/* back from letter space to the world's x and z */
+	*tx = ca * tlx + sa * tly;
+	*tz = -(-sa * tlx + ca * tly);
+	return best;
+}
+
+static void desk_carving(vec3 w, struct mtl *m)
+{
+	double tx, tz;
+	double r = carve_field(w, &tx, &tz);
+	if (r > 2.0) {
+		return;
+	}
+	/* the lamp lights the wall that faces it and leaves the other in the
+	 * shadow of the lip; bounce light finds the bottom of a cut too
+	 * seldom for the trace to say so at one sample a pixel */
+	vec3 lamp = ROOM_LAMP_POS;
+	double lx = lamp.x - w.x, lzz = lamp.z - w.z, ll = sqrt(lx * lx + lzz * lzz) + 1e-9;
+	double face = clampf((tx * lx + tz * lzz) / ll, -1.0, 1.0);
+	double cut = smoothstepf(1.05, 0.82, r);
+	double fibre = room_noise(w.x * 70.0, w.z * 7.0);
+	vec3 raw = vmul(v3(0.46, 0.27, 0.14), 0.72 + 0.40 * fibre);
+	/* the bottom of the V is where the dust and the shadow go */
+	raw = vmul(raw, 0.42 + 0.58 * smoothstepf(0.0, 0.55, r));
+	raw = vmul(raw, 1.0 + face * 0.55);
+	double lip = smoothstepf(1.0, 1.12, r) * smoothstepf(2.0, 1.3, r);
+	double splinter = lip * smoothstepf(0.50, 0.72, room_fbm2(w.x * 42.0 + 2.0, w.z * 3.0));
+	m->albedo = vmix(m->albedo, vmul(m->albedo, 0.80), lip * 0.6);
+	m->albedo = vmix(m->albedo, vmul(v3(0.44, 0.28, 0.16), 0.8 + 0.3 * fibre), splinter * 0.55);
+	m->albedo = vmix(m->albedo, raw, cut);
+	m->coat = clampf(m->coat * (1.0 - fmax(cut, splinter)), 0.0, 1.0);
+	m->rough = clampf(m->rough + (0.82 - m->rough) * fmax(cut, splinter * 0.6), 0.05, 1.0);
+}
+
+static vec3 desk_carving_normal(vec3 n, vec3 w)
+{
+	double tx, tz;
+	double r = carve_field(w, &tx, &tz);
+	if (r > 1.6) {
+		return n;
+	}
+	return vnorm(vadd(n, v3(tx, 0.0, tz)));
+}
+
 /* Somebody has been putting a cup down on this desk for years and not
  * always on a mat. What is left is a ring, because the edge of the puddle
  * is what dried last and darkest -- and it is never a whole ring, because
@@ -3174,6 +3315,7 @@ static void icon_material(int kind, int id, vec3 p, struct mtl *m)
 		/* the top is made of boards running front to back */
 		walnut_at(w, w.x, w.z, m, 5.4, 1.00);
 		desk_stains(w, m);
+		desk_carving(w, m);
 		break;
 	case MID_DESK_BODY:
 		/* the ends and the back rail: knees and shoes, not hands */
@@ -3624,6 +3766,9 @@ static vec3 shade_surface(vec3 p, vec3 n_geo, vec3 rd, int kind, int id,
 	icon_material(kind, id, p, &m);
 
 	vec3 n = perturb_normal(n_geo, scene_local(p, kind, id), m.bump_freq, m.bump_amp);
+	if (kind == ROOM_KIND && id == MID_DESK_TOP) {
+		n = desk_carving_normal(n, p);
+	}
 
 	/* Convex edges wear: paint thins and brightens, metal polishes, and the
 	 * roughness drops because the burr has been rubbed off. */

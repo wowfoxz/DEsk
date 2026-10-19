@@ -1443,6 +1443,138 @@ void walnut_at(vec3 q, float u, float v, inout mtl m, float plank, float use)
 	m.rough = clampf(m.rough + grime * 0.16, 0.05, 1.0);
 }
 
+/* NO FATE. Somebody sat at this desk with a knife one night and cut it into
+ * the top, the way Sarah Connor cut it into the picnic table: two lines of
+ * rough capitals, each stroke two passes of the blade that do not
+ * quite land on each other, a V in the wood with the raw timber showing
+ * pale inside, the fibres torn up along the grain at the edges. It is in
+ * the board, not on it: the walls of the V turn the normal so the lamp
+ * lights one side and not the other, and the raw wood takes the room's
+ * light like the rest of the top. Laid out in letter units (a capital is
+ * 1 high), slanted, at the near left of the top, clear of the drawer's
+ * opening and of where windows open. carve_field gives the distance from
+ * the nearest cut in half widths (r < 1 is inside the groove) and the
+ * slope of the wall there, in world x and z. */
+#define CARVE_N 23
+#define CARVE_S 1.05
+const vec4 CARVE_SEG[CARVE_N] = vec4[CARVE_N](
+	vec4(0.06, -0.02, 0.10, 1.00),
+	vec4(0.10, 1.00, 0.60, 0.10),
+	vec4(0.60, 0.10, 0.66, 1.04),
+	vec4(1.127, 0.974, 0.886, 0.762),
+	vec4(0.886, 0.762, 0.893, 0.389),
+	vec4(0.893, 0.389, 1.05, 0.084),
+	vec4(1.05, 0.084, 1.334, 0.089),
+	vec4(1.334, 0.089, 1.572, 0.305),
+	vec4(1.572, 0.305, 1.533, 0.677),
+	vec4(1.533, 0.677, 1.363, 0.961),
+	vec4(1.363, 0.961, 1.075, 0.966),
+	vec4(-0.62, -1.57, -0.57, -0.45),
+	vec4(-0.59, -0.45, 0.02, -0.35),
+	vec4(-0.59, -1.01, -0.14, -0.95),
+	vec4(0.12, -1.53, 0.42, -0.42),
+	vec4(0.42, -0.42, 0.76, -1.45),
+	vec4(0.25, -1.07, 0.64, -1.03),
+	vec4(0.86, -0.48, 1.48, -0.37),
+	vec4(1.17, -0.43, 1.22, -1.51),
+	vec4(1.62, -0.41, 1.72, -1.47),
+	vec4(1.60, -0.42, 2.16, -0.33),
+	vec4(1.67, -0.95, 2.03, -0.90),
+	vec4(1.72, -1.47, 2.28, -1.35));
+
+float carve_field(vec3 w, out vec2 tilt)
+{
+	tilt = vec2(0.0);
+	float ang = 0.11, ca = cos(ang), sa = sin(ang);
+	float dx = w.x - (-10.9), dz = 4.40 - w.z;
+	vec2 q = vec2(ca * dx - sa * dz, sa * dx + ca * dz) / CARVE_S;
+	if (q.x < -1.0 || q.x > 2.6 || q.y < -2.7 || q.y > 1.3) {
+		return 1e9;
+	}
+	float rag = 1.0 + 0.90 * (room_fbm2(w.x * 34.0 + 5.0, w.z * 4.0) - 0.5);
+	float best = 1e9, side = 1.0;
+	vec2 bdir = vec2(1.0, 0.0);
+	for (int i = 0; i < CARVE_N; i++) {
+		for (int k = 0; k < 2; k++) {
+			float fk = float(k), fi = float(i);
+			vec2 a = CARVE_SEG[i].xy, b = CARVE_SEG[i].zw;
+			vec2 d0 = normalize(b - a), nn = vec2(-d0.y, d0.x);
+			/* the second pass: the blade set down a little off the first */
+			a += nn * (room_noise(fi * 3.1, 7.0 + fk) - 0.5) * 0.07 * fk
+				- d0 * room_noise(fi * 1.7, 3.0 + fk) * 0.06;
+			b += nn * (room_noise(fi * 2.3, 9.0 + fk) - 0.5) * 0.07 * fk
+				+ d0 * (room_noise(fi * 4.9, 5.0 + fk) - 0.4) * 0.08;
+			vec2 ab = b - a;
+			float len = length(ab);
+			vec2 dir = ab / len;
+			vec2 pa = q - a;
+			float h = clampf(dot(pa, dir), 0.0, len);
+			float e = dir.x * pa.y - dir.y * pa.x;
+			/* the hand is not a ruler */
+			e += (room_noise(h * 7.0 + fi * 5.3, fk * 4.0 + 1.0) - 0.5) * 0.045;
+			float along = dot(pa, dir) - h;
+			float hw = 0.052 * (1.0 - fk * 0.30)
+				* mix(0.45, 1.0, smoothstepf(0.0, 0.10, h))
+				* mix(0.20, 1.0, smoothstepf(len, len - 0.16, h))
+				* (0.80 + 0.40 * room_noise(h * 5.0 + fi, fk + 2.0)) * rag;
+			float r = sqrt(e * e + along * along) / hw;
+			if (r < best) {
+				best = r;
+				side = e < 0.0 ? -1.0 : 1.0;
+				bdir = dir;
+			}
+		}
+	}
+	if (best > 1.6) {
+		return best;
+	}
+	/* inside, the wall falls towards the middle of the cut; just outside
+	 * it the torn fibres stand up a little the other way */
+	float s = best < 1.0 ? -1.25 * smoothstepf(0.0, 0.30, best)
+		: 0.30 * smoothstepf(1.6, 1.15, best);
+	vec2 tl = vec2(-bdir.y, bdir.x) * side * s;
+	/* back from letter space to the world's x and z */
+	tilt = vec2(ca * tl.x + sa * tl.y, -(-sa * tl.x + ca * tl.y));
+	return best;
+}
+
+void desk_carving(vec3 w, inout mtl m)
+{
+	vec2 tilt;
+	float r = carve_field(w, tilt);
+	if (r > 2.0) {
+		return;
+	}
+	/* the lamp lights the wall that faces it and leaves the other in the
+	 * shadow of the lip; bounce light finds the bottom of a cut too
+	 * seldom for the trace to say so at one sample a pixel */
+	vec2 lz = normalize(ROOM_LAMP_POS.xz - w.xz);
+	float face = clampf(dot(tilt, lz), -1.0, 1.0);
+	float cut = smoothstepf(1.05, 0.82, r);
+	float fibre = room_noise(w.x * 70.0, w.z * 7.0);
+	vec3 raw = vec3(0.46, 0.27, 0.14) * (0.72 + 0.40 * fibre);
+	/* the bottom of the V is where the dust and the shadow go */
+	raw *= mix(0.42, 1.0, smoothstepf(0.0, 0.55, r));
+	raw *= 1.0 + face * 0.55;
+	float lip = smoothstepf(1.0, 1.12, r) * smoothstepf(2.0, 1.3, r);
+	float splinter = lip * smoothstepf(0.50, 0.72, room_fbm2(w.x * 42.0 + 2.0, w.z * 3.0));
+	m.albedo = mix(m.albedo, m.albedo * 0.80, lip * 0.6);
+	m.albedo = mix(m.albedo, vec3(0.44, 0.28, 0.16) * (0.8 + 0.3 * fibre), splinter * 0.55);
+	m.albedo = mix(m.albedo, raw, cut);
+	m.coat = clampf(m.coat * (1.0 - max(cut, splinter)), 0.0, 1.0);
+	m.rough = clampf(mix(m.rough, 0.82, max(cut, splinter * 0.6)), 0.05, 1.0);
+}
+
+vec3 desk_carving_normal(vec3 n, vec3 w)
+{
+	vec2 tilt;
+	float r = carve_field(w, tilt);
+	if (r > 1.6) {
+		return n;
+	}
+	return normalize(n + vec3(tilt.x, 0.0, tilt.y));
+}
+
 void desk_stains(vec3 w, inout mtl m)
 {
 	const vec4 RING[3] = vec4[3](
@@ -2001,6 +2133,7 @@ mtl icon_material(int id, vec3 pw)
 			m.rough = clampf(m.rough + 0.22, 0.2, 1.0);
 		} else if (id == MID_DESK_TOP) {
 			desk_stains(w, m);
+			desk_carving(w, m);
 		} else if (id == MID_DESK_BODY) {
 			m.albedo *= 0.72;
 			m.coat *= 0.55;
@@ -2072,6 +2205,9 @@ void surface_material(vec3 p, int id, vec3 n_geo, float curv, out mtl m, out vec
 {
 	m = icon_material(id, p);
 	n = perturb_normal(n_geo, scene_local(p, id), m.bump_freq, m.bump_amp);
+	if (id == MID_DESK_TOP) {
+		n = desk_carving_normal(n, p);
+	}
 	if (m.dust > 0.0 || m.metal > 0.5) {
 		float wear = clampf(curv * 1.4 * m.edge, 0.0, 1.0);
 		if (m.metal > 0.5) {
