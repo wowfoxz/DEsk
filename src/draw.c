@@ -20387,7 +20387,13 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 		cairo_pattern_add_color_stop_rgba(g, 0.45, 1, 1, 1, 0.03);
 		cairo_pattern_add_color_stop_rgba(g, 1.00, 1, 1, 1, 0.00);
 		cairo_set_source(cr, g);
-		cairo_rectangle(cr, 0, 0, fw, fh);
+		if (CC[i].round) {
+			/* (local) round glass on a round tube: a rectangle of it stuck
+			 * out past the brass ring at the corners */
+			cairo_arc(cr, fw * 0.5, fh * 0.5, fmin(fw, fh) * 0.5, 0, 2 * M_PI);
+		} else {
+			cairo_rectangle(cr, 0, 0, fw, fh);
+		}
 		cairo_fill(cr);
 		cairo_pattern_destroy(g);
 	}
