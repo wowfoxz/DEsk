@@ -12760,8 +12760,8 @@ static void binder_label_face(cairo_t *cr, double w, double h,
 	cairo_stroke(cr);
 
 	/* typed smaller for a long name (Développement): the card is no wider */
-	show_text_fit_to(cr, DESK_FONT_TYPE, name, w * 0.5, h * 0.42, h * 0.125, true,
-		0.16, 0.12, 0.09, 0.95, 0, w * 0.72, 0.35);
+	show_text_fit_to(cr, DESK_FONT_TYPE, name, w * 0.5, h * 0.40, h * 0.20, true,
+		0.06, 0.04, 0.03, 1.0, 0, w * 0.78, 0.35);
 
 	wobble_line(cr, w * 0.20, h * 0.60, w * 0.80, h * 0.60, seed, 3, 0.5, 1.0,
 		0.30, 0.22, 0.15, 0.55);
@@ -12775,7 +12775,7 @@ static void binder_label_face(cairo_t *cr, double w, double h,
 
 	/* the ribbon, over everything that was typed with it */
 	ink_skip(cr, w * 0.10, h * 0.16, w * 0.80, h * 0.44, seed + 3,
-		0.30 + years * 0.26, 0.876, 0.842, 0.762);
+		0.06 + years * 0.06, 0.876, 0.842, 0.762);
 	ink_skip(cr, w * 0.30, h * 0.66, w * 0.40, h * 0.24, seed + 9,
 		0.20 + years * 0.18, 0.876, 0.842, 0.762);
 
@@ -19207,12 +19207,35 @@ static void cc_battery_card(cairo_t *cr, double w, double h, const void *arg)
 	}
 }
 
+/* On a machine with no cell: the same meter, reading the graphics card */
+static void cc_gpu_card(cairo_t *cr, double w, double h, const void *arg)
+{
+	(void)arg;
+	cairo_set_source_rgb(cr, 0.852, 0.818, 0.732);
+	cairo_paint(cr);
+	paper_age(cr, w, h, 401, 0.62);
+	double cx = w * 0.5, cy = h * 1.06, rad = h * 0.78;
+	cc_scale_arc(cr, cx, cy, rad, 20);
+	show_text_as(cr, DESK_FONT_ENGRAVE, "GPU", w * 0.5, h * 0.30, h * 0.16, true,
+		0.20, 0.17, 0.13, 0.9, 0);
+	show_text_as(cr, DESK_FONT_ENGRAVE, "0", w * 0.16, h * 0.62, h * 0.12, false, 0.24,
+		0.20, 0.16, 0.8, 0);
+	show_text_as(cr, DESK_FONT_ENGRAVE, "100", w * 0.86, h * 0.62, h * 0.12, false,
+		0.24, 0.20, 0.16, 0.8, 0);
+}
+
 static void cc_face_battery(cairo_t *cr, double w, double h,
 	const struct desk_meters *m, double warm)
 {
-	cc_card(cr, 0, w, h, m->have_battery ? 1u : 2u, cc_battery_card, m);
+	if (!m->have_battery && m->have_gpu) {
+		cc_card(cr, 0, w, h, 3u, cc_gpu_card, m);
+	} else {
+		cc_card(cr, 0, w, h, m->have_battery ? 1u : 2u, cc_battery_card, m);
+	}
 	double cx = w * 0.5, cy = h * 1.06, rad = h * 0.78;
-	if (m->have_battery) {
+	if (!m->have_battery && m->have_gpu) {
+		cc_needle(cr, cx, cy, rad * 0.86, m->gpu * warm, 0.16, 0.14, 0.12);
+	} else if (m->have_battery) {
 		cc_needle(cr, cx, cy, rad * 0.86, m->battery * warm, 0.16, 0.14, 0.12);
 	} else {
 		cc_needle(cr, cx, cy, rad * 0.86, warm, 0.62, 0.16, 0.12);
@@ -20569,6 +20592,8 @@ uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 	case CC_BATT:
 		KEY_ADD(h, m->have_battery);
 		KEY_ADD(h, m->battery);
+		KEY_ADD(h, m->have_gpu);
+		KEY_ADD(h, round(m->gpu * 100.0));
 		break;
 	case CC_NET: {
 		KEY_ADD(h, m->net_up);
@@ -23523,7 +23548,7 @@ double desk_scene_views_progress(int *view)
 
 static struct desk_clock_state g_clk;
 static const char *const CLK_KEY_NAME[DESK_CLOCK_KEYS] = { "clock|CLOCK", "clock|DAY",
-	"clock|MEDIA", "clock|POWER" };
+	"clock|MEDIA", "clock|WEATHER" };
 
 static double clk_key_x(int i)
 {
@@ -23839,6 +23864,7 @@ static const unsigned char *dots_glyph(int ch)
 		{ '~', { 0x02, 0x01, 0x02, 0x04, 0x02 } }, { '^', { 0x04, 0x02, 0x01, 0x02, 0x04 } },
 		{ '{', { 0x00, 0x08, 0x36, 0x41, 0x00 } }, { '}', { 0x00, 0x41, 0x36, 0x08, 0x00 } },
 		{ '\\', { 0x02, 0x04, 0x08, 0x10, 0x20 } },
+		{ '`', { 0x00, 0x06, 0x09, 0x09, 0x06 } },   /* (the degree sign) */
 	};
 	if (ch >= 'a' && ch <= 'z') {
 		ch -= 32;
@@ -24858,7 +24884,7 @@ static void clk_reading(cairo_t *cr, double x, double y, const char *label, cons
 	dots_text(cr, unit, x + wd + 5.0, y + 27.0, 1.35, -1, lit * 0.9);
 }
 
-static void clk_page_power(cairo_t *cr, double lit)
+__attribute__((unused)) static void clk_page_power(cairo_t *cr, double lit)
 {
 	double x = CLK_WX, y = CLK_WY;
 	const struct desk_supply *s = &g_clk.supply;
@@ -24933,6 +24959,54 @@ static void clk_page_power(cairo_t *cr, double lit)
 		snprintf(src, sizeof src, "MEASURED: %s", s->source);
 		dots_text(cr, src, x + CLK_WW * 0.5, y + 51.0, 1.15, 0, lit * 0.75);
 	}
+}
+
+/* WEATHER: the weather out there now, where the house is */
+static void clk_page_weather(cairo_t *cr, double lit)
+{
+	double x = CLK_WX, y = CLK_WY;
+	const struct desk_wx_now *w = &g_clk.wx;
+	bool es = desk_lang_get() == DESK_LANG_ES;
+	if (!w->have) {
+		dots_text(cr, es ? "SIN DATOS DEL CLIMA" : "NO WEATHER YET", x + CLK_WW * 0.5, y + 20.0,
+			1.5, 0, lit * 0.85);
+		dots_text(cr, es ? "SE CONSULTA CADA 30 MIN" : "ASKED EVERY 30 MIN", x + CLK_WW * 0.5,
+			y + 38.0, 1.15, 0, lit * 0.7);
+		return;
+	}
+	static const char *const ES[DESK_WX_N] = { "DESPEJADO", "NUBES", "NUBLADO", "NIEBLA",
+		"LLUVIA", "NIEVE", "TORMENTA" };
+	static const char *const EN[DESK_WX_N] = { "CLEAR", "CLOUDS", "OVERCAST", "FOG", "RAIN",
+		"SNOW", "STORM" };
+	int wx = w->wx >= 0 && w->wx < DESK_WX_N ? w->wx : 0;
+	char t[16];
+	if (w->temp > -500.0) {
+		snprintf(t, sizeof t, "%d", (int)lround(w->temp));
+	} else {
+		snprintf(t, sizeof t, "--");
+	}
+	double wd = seg7_text(cr, t, x + 10.0, y + 8.0, 21.0, 38.0, 5.0, lit);
+	dots_text(cr, "`C", x + 10.0 + wd + 4.0, y + 9.0, 1.8, -1, lit);
+	dots_text(cr, es ? "AHORA" : "NOW", x + 10.0, y + 52.0, 1.15, -1, lit * 0.7);
+	double rx = x + 118.0;
+	seg14_text(cr, es ? ES[wx] : EN[wx], rx, y + 4.0, 9.0, 15.0, 2.5, lit);
+	char l1[48], l2[48], l3[48];
+	if (w->tmax > -500.0 && w->tmin > -500.0) {
+		snprintf(l1, sizeof l1, "MAX %d`  MIN %d`", (int)lround(w->tmax), (int)lround(w->tmin));
+	} else {
+		snprintf(l1, sizeof l1, "MAX --  MIN --");
+	}
+	if (w->pop >= 0.0) {
+		snprintf(l2, sizeof l2, es ? "LLUVIA %d%%  HUM %d%%" : "RAIN %d%%  HUM %d%%",
+			(int)lround(w->pop), (int)lround(fmax(w->hum, 0.0)));
+	} else {
+		snprintf(l2, sizeof l2, "HUM %d%%", (int)lround(fmax(w->hum, 0.0)));
+	}
+	snprintf(l3, sizeof l3, es ? "SENS %d`  VIENTO %d KM/H" : "FEELS %d`  WIND %d KM/H",
+		(int)lround(w->feels > -500.0 ? w->feels : w->temp), (int)lround(fmax(w->wind, 0.0)));
+	dots_text(cr, l1, rx, y + 26.0, 1.3, -1, lit);
+	dots_text(cr, l2, rx, y + 38.0, 1.3, -1, lit * 0.9);
+	dots_text(cr, l3, rx, y + 50.0, 1.3, -1, lit * 0.9);
 }
 
 /* ---- the keys ---- */
@@ -25164,7 +25238,7 @@ static void gadget_clock(cairo_t *cr, double w, double h, time_t now)
 		clk_page_media(cr, lit);
 		break;
 	case DESK_CLOCK_POWER:
-		clk_page_power(cr, lit);
+		clk_page_weather(cr, lit);
 		break;
 	default:
 		clk_page_time(cr, &tmv, lit);
@@ -25237,6 +25311,13 @@ uint64_t desk_clock_key(time_t now)
 		CLK_MIX(title, strlen(title));
 		CLK_MIX(md->artist, strlen(md->artist));
 		CLK_MIX(md->player, strlen(md->player));
+	}
+	if (g_clk.mode == DESK_CLOCK_POWER) {
+		const struct desk_wx_now *w = &g_clk.wx;
+		int wq[8] = { w->have, w->wx, (int)lround(w->temp), (int)lround(w->feels),
+			(int)lround(w->hum), (int)lround(w->wind), (int)lround(w->tmax * 10 + w->tmin),
+			(int)lround(w->pop) };
+		CLK_MIX(wq, sizeof wq);
 	}
 	if (g_clk.mode == DESK_CLOCK_POWER) {
 		const struct desk_supply *s = &g_clk.supply;
@@ -25420,10 +25501,15 @@ bool desk_clock_pick(int w, int h, double px, double py, double drawer_open,
 	return true;
 }
 
+static bool bell_box(int w, int h, double box[4]);
+
 bool desk_overlay_box(int which, int w, int h, double box[4])
 {
 	if (which == DESK_OVL_SLIPS) {
 		return slips_box(w, h, box);
+	}
+	if (which == DESK_OVL_BELL) {
+		return bell_box(w, h, box);
 	}
 	if (which != DESK_OVL_CLOCK) {
 		return false;
@@ -29962,6 +30048,359 @@ bool desk_shelf_memo_hit(int w, int h, double x, double y)
 	return x >= b[0] - mx && x <= b[0] + b[2] + mx && y >= b[1] - my && y <= b[1] + b[3] + my;
 }
 
+/* ---- the bell on the desk ----------------------------------------
+ *
+ * A brass service bell on a walnut block, standing on the tray between the
+ * clock and the post box. shell.conf's bell names a program (its desktop
+ * id) that a ring of it brings: to the front, if it has a window, or
+ * started, if it has not. It is not traced with the room -- it comes and
+ * goes with that one line, and the room's key does not change with it --
+ * but drawn over it, as the plates are, by the same lamp; and it stands
+ * inside the tray as measured, so windows keep off it as they keep off
+ * the rest of the tray.
+ *
+ * Room units, before it is made smaller where the gap is tight. */
+#define BELL_BASE 0.78        /* half across the block */
+#define BELL_BASE_T 0.20      /* how thick the block is */
+#define BELL_DOME 0.62        /* the dome's radius at its foot */
+#define BELL_DOME_H 0.56      /* and how high it stands on the block */
+#define BELL_KNOB 0.15        /* the plunger's head */
+#define BELL_KNOB_Y (BELL_BASE_T + BELL_DOME_H + 0.20)   /* up to it, at rest */
+#define BELL_KNOB_TRAVEL 0.13 /* how far it goes down when struck */
+
+static struct {
+	bool shown;
+	char name[96];    /* chalked under it with the hand on it */
+	double lift;      /* 0 at rest .. 1 the hand on it */
+	double press;     /* 0 the plunger up .. 1 right down */
+} g_bell;
+
+void desk_bell_set(bool shown, const char *name, double lift, double press)
+{
+	g_bell.shown = shown;
+	snprintf(g_bell.name, sizeof g_bell.name, "%s", name ? name : "");
+	g_bell.lift = clampf(lift, 0.0, 1.0);
+	g_bell.press = clampf(press, 0.0, 1.0);
+}
+
+bool desk_bell_shown(void)
+{
+	return g_bell.shown;
+}
+
+/* Where it is on the screen for a drawer position: the foot of the block
+ * (b), the top of it (t), the crown of the dome (d) and the plunger's head
+ * (k) as it is now, each with the pixels to a room unit there; and how
+ * much smaller than made it is. */
+struct bell_geo {
+	double s;
+	double bx, by, bp;
+	double tx, ty, tp;
+	double dx, dy, dp;
+	double kx, ky, kp;
+};
+
+static bool bell_point(const struct room_xf *xf, double x, double y, double z,
+	double *sx, double *sy, double *ppu)
+{
+	double u0, v0, u1, v1;
+	if (!room_project(&xf->rr->cam, v3(x, y, z), &u0, &v0)
+		|| !room_project(&xf->rr->cam, v3(x + 1.0, y, z), &u1, &v1)) {
+		return false;
+	}
+	double sw = xf->rr->w * xf->scale, sh = xf->rr->h * xf->scale;
+	*sx = xf->ox + u0 * sw;
+	*sy = xf->oy + v0 * sh;
+	*ppu = hypot((u1 - u0) * sw, (v1 - v0) * sh);
+	return true;
+}
+
+static bool bell_geo(int w, int h, double open, struct bell_geo *g)
+{
+	struct room_xf xf;
+	if (!g_bell.shown || !room_xform(w, h, open, &xf)) {
+		return false;
+	}
+	/* in the gap between the clock's case and the post box's foot, and
+	 * smaller rather than touching either where the desk is narrow */
+	const struct room_gadget *clk = &ROOM_GADGETS[DESK_GADGET_CLOCK];
+	double x0 = clk->x + clk->hx, x1 = RM_PB_CX - RM_PB_HX - 0.16;
+	double s = clampf((x1 - x0 - 0.36) / (2.0 * BELL_BASE), 0.5, 1.0);
+	double x = (x0 + x1) * 0.5;
+	/* as far back as leaves its plunger in view, and its block clear of
+	 * the desk's far edge -- the line the clock is set back to as well */
+	double k = RM_FOV_X_V * 0.5 / g_rm_aspect;
+	double z = RM_ZF + fmax(k * BELL_KNOB_Y * s + BELL_KNOB * s,
+		k * BELL_BASE_T * s + BELL_BASE * s) + 0.10;
+	g->s = s;
+	double ky = (BELL_KNOB_Y - BELL_KNOB_TRAVEL * g_bell.press) * s;
+	return bell_point(&xf, x, 0.0, z, &g->bx, &g->by, &g->bp)
+		&& bell_point(&xf, x, BELL_BASE_T * s, z, &g->tx, &g->ty, &g->tp)
+		&& bell_point(&xf, x, (BELL_BASE_T + BELL_DOME_H) * s, z, &g->dx, &g->dy, &g->dp)
+		&& bell_point(&xf, x, ky, z, &g->kx, &g->ky, &g->kp);
+}
+
+/* The size the chalked name is written at, and how wide it comes out. */
+static double bell_label(const struct bell_geo *g, double *ww)
+{
+	double fs = fmax(0.36 * g->bp, 9.0);
+	*ww = g_bell.name[0] ? word_width(agd_measure(), g_bell.name, fs) : 0.0;
+	return fs;
+}
+
+/* The block's extent on the screen (x0, y0, x1, y1): what is touched. */
+static void bell_body(const struct bell_geo *g, double r[4])
+{
+	double B = BELL_BASE * g->s;
+	r[0] = fmin(g->bx - B * g->bp, g->tx - B * g->tp);
+	r[1] = fmin(g->by - B * g->bp, g->ty - B * g->tp);
+	r[2] = fmax(g->bx + B * g->bp, g->tx + B * g->tp);
+	r[3] = fmax(g->by + B * g->bp, g->ty + B * g->tp);
+}
+
+static bool bell_box(int w, int h, double box[4])
+{
+	struct bell_geo g;
+	if (!bell_geo(w, h, 0.0, &g)) {
+		/* nothing to draw: an empty box, and the sprite is put away */
+		box[0] = box[1] = box[2] = box[3] = 0.0;
+		return true;
+	}
+	double r[4];
+	bell_body(&g, r);
+	/* and the shadow round it, and the name under it */
+	double pad = fmax(0.55 * g.bp, 8.0);
+	double ww, fs = bell_label(&g, &ww);
+	double x0 = fmin(r[0] - pad, g.bx - ww * 0.5 - 4.0);
+	double x1 = fmax(r[2] + pad, g.bx + ww * 0.5 + 4.0);
+	box[0] = floor(x0);
+	box[1] = floor(r[1] - pad);
+	box[2] = ceil(x1) - box[0];
+	box[3] = ceil(r[3] + fs * 1.9) - box[1];
+	return true;
+}
+
+bool desk_bell_hit(int w, int h, double px, double py, double open)
+{
+	struct bell_geo g;
+	if (!bell_geo(w, h, open, &g)) {
+		return false;
+	}
+	double r[4];
+	bell_body(&g, r);
+	double m = 0.10 * g.bp;
+	return px >= r[0] - m && px <= r[2] + m && py >= r[1] - m && py <= r[3] + m;
+}
+
+/* The block from above: a rounded square, half B across, at (x, y). */
+static void bell_square(cairo_t *cr, double x, double y, double B)
+{
+	desk_rounded_path(cr, x - B, y - B, 2.0 * B, 2.0 * B, B * 0.22);
+}
+
+static void bell_paint(cairo_t *cr, int w, int h, double open)
+{
+	struct bell_geo g;
+	if (!bell_geo(w, h, open, &g)) {
+		return;
+	}
+	double s = g.s, lift = g_bell.lift;
+	double hot = 1.0 + 0.10 * lift;   /* the brass catching more light under the hand */
+	cairo_save(cr);
+	desk_set_paint_origin(0, 0);
+
+	/* its shadow, from the room's lamp: long as it is tall, and soft */
+	double Bb = BELL_BASE * s * g.bp;
+	if (gfx_shadows()) {
+		double ox, oy;
+		shadow_dir(g.bx, g.by, BELL_KNOB_Y * s * g.bp * 0.55, &ox, &oy);
+		for (int i = 6; i >= 1; i--) {
+			double t = i / 6.0, grow = Bb * 0.30 * t;
+			cairo_set_source_rgba(cr, 0.06, 0.04, 0.03, 0.10 * (1.0 - t) + 0.02);
+			cairo_arc(cr, g.bx + ox * 0.6, g.by + oy * 0.6, Bb * 0.95 + grow, 0, 2 * M_PI);
+			cairo_fill(cr);
+		}
+		contact_shadow(cr, g.bx - Bb, g.by - Bb, Bb * 2.0, Bb * 2.0, 0.42);
+	}
+
+	/* the walnut block: its sides, from the foot up to the top face --
+	 * the front one shown a little deeper than the camera quite sees it,
+	 * or from straight over it the block is a tile */
+	double Bt = BELL_BASE * s * g.tp;
+	double fy = fmax(g.by, g.ty + 0.10 * s * g.tp);
+	cairo_set_source_rgb(cr, 0.247, 0.137, 0.070);
+	for (int i = 0; i <= 4; i++) {
+		double u = i / 4.0;
+		bell_square(cr, g.bx + (g.tx - g.bx) * u, fy + (g.ty - fy) * u,
+			Bb + (Bt - Bb) * u);
+		cairo_fill(cr);
+	}
+	/* and its top, oiled: lit from the lamp's side */
+	double lx, ly, lz;
+	lamp_toward(g.tx, g.ty, &lx, &ly, &lz);
+	double ln = fmax(hypot(lx, ly), 1e-6);
+	lx /= ln;
+	ly /= ln;
+	cairo_save(cr);
+	bell_square(cr, g.tx, g.ty, Bt);
+	cairo_clip(cr);
+	cairo_pattern_t *wg = cairo_pattern_create_linear(g.tx + lx * Bt, g.ty + ly * Bt,
+		g.tx - lx * Bt, g.ty - ly * Bt);
+	cairo_pattern_add_color_stop_rgb(wg, 0.00, 0.604, 0.384, 0.212);   /* #9a6236 */
+	cairo_pattern_add_color_stop_rgb(wg, 0.40, 0.529, 0.325, 0.173);   /* #87532c */
+	cairo_pattern_add_color_stop_rgb(wg, 1.00, 0.337, 0.192, 0.102);   /* #56311a */
+	cairo_set_source(cr, wg);
+	cairo_paint(cr);
+	cairo_pattern_destroy(wg);
+	/* the grain, across the block */
+	cairo_set_line_width(cr, fmax(Bt * 0.025, 0.8));
+	for (int i = 0; i < 9; i++) {
+		double yy = g.ty - Bt + (i + 0.5) * (2.0 * Bt / 9.0);
+		double wob = (hash21(i * 3.1, 7.7) - 0.5) * Bt * 0.10;
+		cairo_set_source_rgba(cr, 0.227, 0.125, 0.063, 0.22 + 0.20 * hash21(i * 1.7, 2.3));
+		cairo_move_to(cr, g.tx - Bt, yy + wob);
+		cairo_curve_to(cr, g.tx - Bt * 0.3, yy - wob * 1.6, g.tx + Bt * 0.3, yy + wob * 2.0,
+			g.tx + Bt, yy - wob);
+		cairo_stroke(cr);
+	}
+	overlay_grain(cr, g.tx - Bt, g.ty - Bt, Bt * 2.0, Bt * 2.0, 0.8);
+	cairo_restore(cr);
+	/* its edge: the lit side caught, the far one dark */
+	cairo_set_line_width(cr, fmax(Bt * 0.035, 1.0));
+	cairo_set_source_rgba(cr, 0.753, 0.541, 0.333, 0.50);   /* #c08a55 */
+	bell_square(cr, g.tx, g.ty, Bt - 0.6);
+	cairo_stroke(cr);
+	cairo_set_source_rgba(cr, 0.14, 0.07, 0.03, 0.55);
+	bell_square(cr, g.tx, g.ty, Bt);
+	cairo_stroke(cr);
+
+	/* the foot ring the dome stands in, and the dome: brass, its light
+	 * where the lamp is, going down to the dark of the desk round it */
+	double rf = (BELL_DOME + 0.05) * s * g.tp;
+	cairo_set_source_rgb(cr, 0.431 * hot, 0.310 * hot, 0.094 * hot);   /* #6e4f18 */
+	cairo_arc(cr, g.tx, g.ty, rf, 0, 2 * M_PI);
+	cairo_fill(cr);
+	double rd = BELL_DOME * s * (g.tp + g.dp) * 0.5;
+	double cx = g.tx + (g.dx - g.tx) * 0.35, cy = g.ty + (g.dy - g.ty) * 0.35;
+	double hx = cx + lx * rd * 0.46, hy = cy + ly * rd * 0.46;
+	cairo_pattern_t *bg = cairo_pattern_create_radial(hx, hy, 0.0, cx, cy, rd);
+	cairo_pattern_add_color_stop_rgb(bg, 0.00, fmin(1.0, 1.000 * hot), fmin(1.0, 0.984 * hot),
+		fmin(1.0, 0.910 * hot));
+	cairo_pattern_add_color_stop_rgb(bg, 0.08, fmin(1.0, 1.000 * hot), fmin(1.0, 0.941 * hot),
+		0.749 * hot);   /* #fff0bf */
+	cairo_pattern_add_color_stop_rgb(bg, 0.30, 0.902 * hot, 0.757 * hot, 0.400 * hot);   /* #e6c166 */
+	cairo_pattern_add_color_stop_rgb(bg, 0.60, 0.753 * hot, 0.573 * hot, 0.220 * hot);
+	cairo_pattern_add_color_stop_rgb(bg, 0.84, 0.655 * hot, 0.482 * hot, 0.165 * hot);   /* #a77b2a */
+	cairo_pattern_add_color_stop_rgb(bg, 1.00, 0.431 * hot, 0.310 * hot, 0.094 * hot);   /* #6e4f18 */
+	cairo_set_source(cr, bg);
+	cairo_arc(cr, cx, cy, rd, 0, 2 * M_PI);
+	cairo_fill(cr);
+	cairo_pattern_destroy(bg);
+	/* the walnut and the desk seen in it, low on the far side */
+	cairo_save(cr);
+	cairo_arc(cr, cx, cy, rd, 0, 2 * M_PI);
+	cairo_clip(cr);
+	cairo_pattern_t *rg = cairo_pattern_create_radial(cx + lx * rd * 0.25, cy + ly * rd * 0.25,
+		rd * 0.70, cx, cy, rd * 1.05);
+	cairo_pattern_add_color_stop_rgba(rg, 0.0, 0.25, 0.13, 0.05, 0.0);
+	cairo_pattern_add_color_stop_rgba(rg, 1.0, 0.25, 0.13, 0.05, 0.46);
+	cairo_set_source(cr, rg);
+	cairo_paint(cr);
+	cairo_pattern_destroy(rg);
+	/* and the lamp in it, small and hard, as polished metal shows it */
+	double sr = rd * 0.16;
+	double spx = cx + lx * rd * 0.50, spy = cy + ly * rd * 0.50;
+	cairo_pattern_t *sp = cairo_pattern_create_radial(spx, spy, 0.0, spx, spy, sr);
+	cairo_pattern_add_color_stop_rgba(sp, 0.0, 1.0, 1.0, 0.96, 0.85);
+	cairo_pattern_add_color_stop_rgba(sp, 1.0, 1.0, 1.0, 0.96, 0.0);
+	cairo_set_source(cr, sp);
+	cairo_arc(cr, spx, spy, sr, 0, 2 * M_PI);
+	cairo_fill(cr);
+	cairo_pattern_destroy(sp);
+	cairo_restore(cr);
+	cairo_set_line_width(cr, fmax(rd * 0.035, 1.0));
+	cairo_set_source_rgba(cr, 0.30, 0.20, 0.05, 0.70);
+	cairo_arc(cr, cx, cy, rd, 0, 2 * M_PI);
+	cairo_stroke(cr);
+
+	/* the G cut in its front, as on the icon: dark, the light catching
+	 * the lower lip of the cut */
+	double gr = rd * 0.20, gx = cx, gy = cy + rd * 0.60;
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_width(cr, fmax(gr * 0.32, 1.0));
+	for (int pass = 0; pass < 2; pass++) {
+		double oy = pass ? 0.0 : fmax(gr * 0.12, 0.6);
+		if (pass) {
+			cairo_set_source_rgba(cr, 0.42, 0.29, 0.08, 0.90);   /* #6b4a14 */
+		} else {
+			cairo_set_source_rgba(cr, 1.0, 0.957, 0.80, 0.60);   /* #fff4cc */
+		}
+		cairo_new_path(cr);
+		cairo_arc_negative(cr, gx, gy + oy, gr, -M_PI * 0.30, M_PI * 0.10);
+		cairo_line_to(cr, gx + gr * 0.12, gy + oy + gr * 0.10);
+		cairo_stroke(cr);
+	}
+
+	/* the plunger: its stem up out of the crown, and its head, which goes
+	 * down when it is struck */
+	double kr = BELL_KNOB * s * g.kp;
+	cairo_set_line_width(cr, fmax(0.06 * s * g.dp, 1.2));
+	cairo_set_source_rgb(cr, 0.431 * hot, 0.310 * hot, 0.094 * hot);
+	cairo_move_to(cr, g.dx, g.dy);
+	cairo_line_to(cr, g.kx, g.ky);
+	cairo_stroke(cr);
+	if (gfx_shadows()) {
+		double ox, oy;
+		shadow_dir(g.kx, g.ky, (BELL_KNOB_Y - BELL_BASE_T - BELL_DOME_H) * s * g.kp * 0.5,
+			&ox, &oy);
+		cairo_pattern_t *ks = cairo_pattern_create_radial(g.kx + ox, g.ky + oy, kr * 0.5,
+			g.kx + ox, g.ky + oy, kr * 1.4);
+		cairo_pattern_add_color_stop_rgba(ks, 0.0, 0.20, 0.12, 0.03, 0.30);
+		cairo_pattern_add_color_stop_rgba(ks, 1.0, 0.20, 0.12, 0.03, 0.0);
+		cairo_set_source(cr, ks);
+		cairo_arc(cr, g.kx + ox, g.ky + oy, kr * 1.4, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pattern_destroy(ks);
+	}
+	cairo_pattern_t *kg = cairo_pattern_create_radial(g.kx + lx * kr * 0.45,
+		g.ky + ly * kr * 0.45, 0.0, g.kx, g.ky, kr);
+	cairo_pattern_add_color_stop_rgb(kg, 0.0, 1.0, 0.95, 0.80);
+	cairo_pattern_add_color_stop_rgb(kg, 0.5, 0.902 * hot, 0.757 * hot, 0.400 * hot);
+	cairo_pattern_add_color_stop_rgb(kg, 1.0, 0.50, 0.36, 0.11);
+	cairo_set_source(cr, kg);
+	cairo_arc(cr, g.kx, g.ky, kr, 0, 2 * M_PI);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(kg);
+	cairo_set_line_width(cr, fmax(kr * 0.10, 0.8));
+	cairo_set_source_rgba(cr, 0.30, 0.20, 0.05, 0.75);
+	cairo_stroke(cr);
+
+	/* with the hand on it, what it brings chalked on the desk under it,
+	 * as the drawer's things have theirs on the felt */
+	if (lift > 0.01 && g_bell.name[0]) {
+		double ww, fs = bell_label(&g, &ww);
+		double r[4];
+		bell_body(&g, r);
+		print_word(cr, g_bell.name, g.bx - ww * 0.5, r[3] + fs * 1.25, fs, 0.93, 0.91, 0.84,
+			0.62 * lift);
+	}
+	cairo_restore(cr);
+}
+
+/* How far down the screen it reaches, for the tray's extent; false if
+ * there is no bell. */
+static bool bell_tray_bottom(int w, int h, double *bottom)
+{
+	struct bell_geo g;
+	if (!bell_geo(w, h, 0.0, &g)) {
+		return false;
+	}
+	double r[4];
+	bell_body(&g, r);
+	*bottom = r[3];
+	return true;
+}
+
 /* ---- the tray ---------------------------------------------------
  *
  * What stands along the back edge of the desk -- the console's ledge, the
@@ -30023,6 +30462,11 @@ static bool tray_measure(int w, int h, struct tray_extent *te)
 	if (g_slips.n > 0 && slip_room(w, h, 0.0, &sr)) {
 		bottom = fmax(bottom,
 			sr.yp + (SLIP_OUT + 0.05 + SLIP_ATTENTION) * sr.s);
+	}
+	/* and the bell, where there is one */
+	double bb;
+	if (bell_tray_bottom(w, h, &bb)) {
+		bottom = fmax(bottom, bb);
 	}
 	if (bottom <= 0.0) {
 		return false;
@@ -30476,6 +30920,7 @@ void desk_draw_gadgets(cairo_t *cr, int w, int h, time_t now, double drawer_open
 	}
 
 	allapps_plate(cr, w, h, false);
+	bell_paint(cr, w, h, drawer_open);
 
 	/* With the drawer out, the desk is not what you are looking at. It goes
 	 * down the way a home screen does behind the multitasking tray -- which
@@ -30514,6 +30959,17 @@ uint64_t desk_overlay_key(int which, time_t now, int unread)
 		return 1u + (uint64_t)(unread > 0 ? unread : 0);
 	case DESK_OVL_SLIPS:
 		return desk_slips_key();
+	case DESK_OVL_BELL: {
+		/* whether it is there, the hand on it and the plunger, in steps
+		 * too small to see, and what is chalked under it */
+		uint64_t k = 14695981039346656037ull;
+		for (const unsigned char *c = (const unsigned char *)g_bell.name; *c; c++) {
+			k = (k ^ *c) * 1099511628211ull;
+		}
+		k ^= (uint64_t)g_bell.shown | (uint64_t)lround(g_bell.lift * 32.0) << 1
+			| (uint64_t)lround(g_bell.press * 32.0) << 8;
+		return k | 1u;
+	}
 	default:
 		return 1u;   /* the plates: they never change */
 	}
@@ -30552,6 +31008,9 @@ void desk_draw_overlay(cairo_t *cr, int which, int w, int h, time_t now, int unr
 		break;
 	case DESK_OVL_SLIPS:
 		slips_paint(cr, w, h);
+		break;
+	case DESK_OVL_BELL:
+		bell_paint(cr, w, h, 0.0);
 		break;
 	default:
 		break;
@@ -34109,7 +34568,7 @@ static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *c
 	g_lock.still = 0;
 	if (g_lock.scale <= 0.0) {
 		/* to begin with, about a third of a million pixels */
-		g_lock.scale = clampf(sqrt(0.35e6 / ((double)W * H)), 0.20, 0.75);
+		g_lock.scale = clampf(sqrt(0.35e6 / ((double)W * H)), 0.50, 0.85);
 	}
 	double s = g_lock.scale;
 	int fw = (int)ceil(W * s), fh = (int)ceil(H * s);
@@ -34121,8 +34580,9 @@ static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *c
 	cairo_surface_t *img = lk_trace(sc, &fc, fw, fh, false);
 	double dt = lk_now() - t0;
 	/* hold the frame rate: about 25 ms a frame */
-	g_lock.scale = clampf(g_lock.scale * clampf(sqrt(0.025 / fmax(dt, 1e-4)), 0.8, 1.2),
-		0.20, 0.75);
+	/* (local: finer while moving, about 33 ms a frame, never under half) */
+	g_lock.scale = clampf(g_lock.scale * clampf(sqrt(0.033 / fmax(dt, 1e-4)), 0.8, 1.2),
+		0.50, 0.85);
 	lk_frame_drop(f);
 	f->img = img;
 	f->cam = *cam;

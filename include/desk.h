@@ -683,6 +683,15 @@ bool desk_allapps_hit(int w, int h, double px, double py);
  * until there is one. And the strip along the bottom that is the shut
  * drawer's pull, which windows keep clear of too. */
 int desk_tray_bottom(int w, int h);
+/* The brass bell on the tray, between the clock and the post box, that
+ * brings the program shell.conf's bell names: whether it is there, what
+ * is chalked under it with the hand on it (name), the hand on it (lift, 0
+ * to 1) and its plunger going down (press, 0 to 1) -- drawn as the
+ * DESK_OVL_BELL overlay. And whether a point on the screen, with the
+ * drawer out by open, is on it. */
+void desk_bell_set(bool shown, const char *name, double lift, double press);
+bool desk_bell_shown(void);
+bool desk_bell_hit(int w, int h, double px, double py, double open);
 int desk_drawer_pull_h(int w, int h);
 /* The lamp that what is drawn over the room is lit by, for which way
  * shadows fall and which side of a crease catches the light: the room's
@@ -1018,6 +1027,7 @@ enum desk_ovl {
 	DESK_OVL_CONSOLE,     /* the console's nameplate and lenses */
 	DESK_OVL_POST,        /* the post box's plate, and a letter */
 	DESK_OVL_SLIPS,       /* the tray's slips, under the Control Panel */
+	DESK_OVL_BELL,        /* the bell on the tray (shell.conf's bell) */
 	DESK_OVL_COUNT,
 };
 uint64_t desk_overlay_key(int which, time_t now, int unread);
@@ -1060,6 +1070,16 @@ static inline int desk_clock_key_mode(int key)
 		DESK_CLOCK_MEDIA, DESK_CLOCK_POWER };
 	return key >= 0 && key < DESK_CLOCK_KEYS ? MODE[key] : DESK_CLOCK_TIME;
 }
+/* The weather now, for the clock's WEATHER page (open-meteo.com) */
+struct desk_wx_now {
+	bool have;
+	int wx;              /* DESK_WX_* */
+	double temp, feels;  /* degrees C */
+	double hum;          /* percent */
+	double wind;         /* km/h */
+	double tmax, tmin;   /* today's */
+	double pop;          /* today's chance of rain, percent; < 0 unknown */
+};
 struct desk_clock_state {
 	int mode;
 	double wake;                          /* 0..1: a hand is near, the keys are lit */
@@ -1075,6 +1095,7 @@ struct desk_clock_state {
 	double show_t;                        /* how far into it, seconds */
 	int year;                             /* the year it is, to say so */
 	struct desk_supply supply;
+	struct desk_wx_now wx;                /* the WEATHER page */
 	double avg_w;                         /* since DEsk started; < 0 unknown */
 	double hour_wh;                       /* in the last hour; < 0 unknown */
 	double hour_span;                     /* how much of that hour there is, 0..1 */

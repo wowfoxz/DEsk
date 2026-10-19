@@ -31,6 +31,8 @@ struct desk_occasion_conf {
 	int bday_month, bday_day;    /* 0: none set */
 	bool celebrations;           /* the door dressed, and the shows */
 	bool weather;                /* ask for the weather */
+	bool have_loc;               /* location set in shell.conf */
+	double lat, lon;             /* where the house is, if so */
 };
 
 /* changed(data) on the compositor's loop when the weather comes in */
@@ -44,3 +46,5 @@ unsigned desk_occasion_today(void);
 void desk_occasion_mood(struct desk_door_mood *m);
 /* once in a while: ask for the weather again if it is old */
 void desk_occasion_tick(void);
+/* the weather as last heard, for the clock */
+void desk_occasion_weather_now(struct desk_wx_now *out);

@@ -145,6 +145,7 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 	{ "clock|DAY", "日付", "日期", "날짜", "FECHA", "DATE", "DATUM" },
 	{ "clock|MEDIA", "音楽", "音乐", "음악", "MÚSICA", "MUSIQUE", "MUSIK" },
 	{ "clock|POWER", "電源", "电源", "전원", "ENERGÍA", "ÉNERGIE", "STROM" },
+	{ "clock|WEATHER", "天気", "天气", "날씨", "CLIMA", "MÉTÉO", "WETTER" },
 	/* the room being set out */
 	/* the calendar */
 	{ "tab|YEAR", "年", "年", "연", "AÑO", "ANNÉE", "JAHR" },

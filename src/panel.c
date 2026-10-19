@@ -9,6 +9,7 @@
 #include "panel.h"
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -287,6 +288,73 @@ static void network(struct desk_meters *m)
 }
 
 /* ---- the cell ---------------------------------------------------- */
+
+/* ---- the graphics card ---------------------------------------- *
+ *
+ * How busy the card is: AMD's and Intel Xe's own number under /sys, or
+ * NVIDIA's driver library (NVML), opened when it is there and never
+ * linked against. Nothing behind it: have_gpu stays false. */
+
+typedef int (*nvml_fn0)(void);
+typedef int (*nvml_handle_fn)(unsigned, void **);
+struct nvml_util { unsigned gpu, memory; };
+typedef int (*nvml_util_fn)(void *, struct nvml_util *);
+
+static int g_nvml = -1;            /* -1 not tried, 0 none, 1 ready */
+static void *g_nvml_dev;
+static nvml_util_fn g_nvml_util;
+
+static bool nvml_ready(void)
+{
+	if (g_nvml >= 0) {
+		return g_nvml == 1;
+	}
+	g_nvml = 0;
+	void *lib = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+	if (!lib) {
+		return false;
+	}
+	nvml_fn0 init = (nvml_fn0)dlsym(lib, "nvmlInit_v2");
+	nvml_handle_fn handle = (nvml_handle_fn)dlsym(lib, "nvmlDeviceGetHandleByIndex_v2");
+	g_nvml_util = (nvml_util_fn)dlsym(lib, "nvmlDeviceGetUtilizationRates");
+	if (!init || !handle || !g_nvml_util || init() != 0 || handle(0, &g_nvml_dev) != 0) {
+		dlclose(lib);
+		return false;
+	}
+	g_nvml = 1;
+	return true;
+}
+
+static void gpu_busy(struct desk_meters *m)
+{
+	m->have_gpu = false;
+	m->gpu = 0.0;
+	DIR *d = opendir("/sys/class/drm");
+	if (d) {
+		struct dirent *e;
+		while ((e = readdir(d)) != NULL) {
+			if (strncmp(e->d_name, "card", 4) != 0 || strchr(e->d_name, '-')) {
+				continue;
+			}
+			char p[512];
+			snprintf(p, sizeof p, "/sys/class/drm/%s/device/gpu_busy_percent", e->d_name);
+			double v = read_number(p, -1.0);
+			if (v >= 0.0) {
+				m->have_gpu = true;
+				m->gpu = fmax(m->gpu, fmin(v / 100.0, 1.0));
+			}
+		}
+		closedir(d);
+	}
+	if (m->have_gpu || !nvml_ready()) {
+		return;
+	}
+	struct nvml_util u;
+	if (g_nvml_util(g_nvml_dev, &u) == 0) {
+		m->have_gpu = true;
+		m->gpu = fmin(u.gpu / 100.0, 1.0);
+	}
+}
 
 static void battery(struct desk_meters *m)
 {
@@ -613,6 +681,9 @@ void desk_meters_read(struct desk_meters *out)
 	}
 	network(out);
 	battery(out);
+	if (!out->have_battery) {
+		gpu_busy(out);
+	}
 	radios(out);
 	volume(out);
 }

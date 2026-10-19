@@ -55,6 +55,7 @@ One `key = value` per line; `#` starts a comment.
 | `clock` | `24h`, `12h` | `24h` | |
 | `lights_at_login` | `yes`, `no` | `yes` | The room starts dark and the lamp comes up as it is made. |
 | `celebrations` | `yes`, `no` | `yes` | The door and clock on certain days (not in Shell Settings). |
+| `bell` | `none`, or a desktop file id (`grok-bot.desktop`) | `none` | A brass service bell on the tray, between the clock and the post box. Clicking it brings that program's window to the front (unfolding it if it was folded away), or starts the program if it has no window. Not in Shell Settings. |
 
 ### Screen
 

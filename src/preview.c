@@ -751,7 +751,7 @@ static int write_lock(const char *path, int w, int h)
 #define PREVIEW_USAGE "usage: desk-preview [-o file.png] [-s 1600x1000] [--no-window] " \
 	"[--closed] [--apps] [--shelf] [--console] [--post] [--sounds DIR] [--calendar] " \
 	"[--memo] [--lock] [--boot[=u,u,...]] [--agenda] [--book] [--book-anim[=u,u,...]] " \
-	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]]\n"
+	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]] [--bell[=hot|press]]\n"
 
 int main(int argc, char **argv)
 {
@@ -780,6 +780,13 @@ int main(int argc, char **argv)
 			}
 		} else if (strcmp(argv[i], "--no-window") == 0) {
 			demo = false;
+		} else if (strncmp(argv[i], "--bell", 6) == 0
+			&& (argv[i][6] == '\0' || argv[i][6] == '=')) {
+			/* the bell on the tray, as shell.conf's bell puts it there: at
+			 * rest, with the hand on it, or struck */
+			const char *how = argv[i][6] == '=' ? argv[i] + 7 : "";
+			desk_bell_set(true, "Grok Bot", strcmp(how, "hot") == 0 ? 1.0 : 0.0,
+				strcmp(how, "press") == 0 ? 1.0 : 0.0);
 		} else if (strcmp(argv[i], "--closed") == 0) {
 			drawer = 0.0;
 		} else if (strcmp(argv[i], "--shelf") == 0) {

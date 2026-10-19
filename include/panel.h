@@ -28,6 +28,9 @@ struct desk_meters {
 	double battery;    /* 0..1 */
 	bool on_mains;
 
+	bool have_gpu;     /* the graphics card says how busy it is */
+	double gpu;        /* 0..1 */
+
 	bool have_volume;
 	double volume;     /* 0..1 */
 	bool muted;

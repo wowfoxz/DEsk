@@ -25,7 +25,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-static struct desk_occasion_conf g_conf = { 0, 0, true, true };
+static struct desk_occasion_conf g_conf = { 0, 0, true, true, false, 0.0, 0.0 };
 static double g_offset;                  /* DESK_TODAY's, against the real clock */
 static double g_lat = 35.0, g_lon = 135.0;
 
@@ -33,6 +33,7 @@ static pthread_mutex_t g_wx_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_wx = DESK_WX_CLEAR;       /* as last heard */
 static double g_heavy;
 static bool g_have_wx;
+static struct desk_wx_now g_now;   /* under g_wx_lock */
 static int g_wx_test = -1;               /* DESK_WEATHER's */
 static double g_heavy_test = 0.6;
 static double g_asked_at = -1e9;         /* monotonic seconds */
@@ -300,12 +301,30 @@ static bool run_out(char *const argv[], char *out, size_t n)
 	return got > 0;
 }
 
+/* a number in the JSON after "key": (or the first of "key":[...]), looked
+ * for only up to the end of the object it is in */
+static double jnum(const char *obj, const char *key, bool array, double fb)
+{
+	const char *end = strchr(obj, '}');
+	char pat[64];
+	snprintf(pat, sizeof pat, "\"%s\":%s", key, array ? "[" : "");
+	const char *k = strstr(obj, pat);
+	if (!k || (end && k > end)) {
+		return fb;
+	}
+	char *e = NULL;
+	double v = strtod(k + strlen(pat), &e);
+	return e && e != k + strlen(pat) ? v : fb;
+}
+
 static void *fetch(void *arg)
 {
 	double *ll = arg;
-	char url[256];
+	char url[512];
 	snprintf(url, sizeof url, "https://api.open-meteo.com/v1/forecast?latitude=%.2f"
-		"&longitude=%.2f&current=weather_code", ll[0], ll[1]);
+		"&longitude=%.2f&current=weather_code,temperature_2m,apparent_temperature,"
+		"relative_humidity_2m,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,"
+		"precipitation_probability_max&forecast_days=1&timezone=auto", ll[0], ll[1]);
 	free(ll);
 	char out[8192];
 	char *curl[] = { "curl", "-fsS", "--max-time", "20", url, NULL };
@@ -317,8 +336,22 @@ static void *fetch(void *arg)
 		int wx;
 		double heavy;
 		wmo(atoi(code + 15), &wx, &heavy);
+		struct desk_wx_now nw;
+		memset(&nw, 0, sizeof nw);
+		nw.have = true;
+		nw.wx = wx;
+		nw.temp = jnum(cur, "temperature_2m", false, -999.0);
+		nw.feels = jnum(cur, "apparent_temperature", false, -999.0);
+		nw.hum = jnum(cur, "relative_humidity_2m", false, -1.0);
+		nw.wind = jnum(cur, "wind_speed_10m", false, -1.0);
+		const char *day = strstr(out, "\"daily\":{");
+		nw.tmax = day ? jnum(day, "temperature_2m_max", true, -999.0) : -999.0;
+		nw.tmin = day ? jnum(day, "temperature_2m_min", true, -999.0) : -999.0;
+		nw.pop = day ? jnum(day, "precipitation_probability_max", true, -1.0) : -1.0;
 		pthread_mutex_lock(&g_wx_lock);
-		bool changed = !g_have_wx || wx != g_wx || heavy != g_heavy;
+		bool changed = !g_have_wx || wx != g_wx || heavy != g_heavy
+			|| lround(nw.temp) != lround(g_now.temp) || lround(nw.hum) != lround(g_now.hum);
+		g_now = nw;
 		g_wx = wx;
 		g_heavy = heavy;
 		g_have_wx = true;
@@ -380,6 +413,16 @@ static int woken(int fd, uint32_t mask, void *data)
 		g_changed(g_data);
 	}
 	return 0;
+}
+
+void desk_occasion_weather_now(struct desk_wx_now *out)
+{
+	pthread_mutex_lock(&g_wx_lock);
+	*out = g_now;
+	if (!g_have_wx || !g_conf.weather) {
+		out->have = false;
+	}
+	pthread_mutex_unlock(&g_wx_lock);
 }
 
 void desk_occasion_tick(void)
@@ -462,6 +505,21 @@ void desk_occasion_conf(const struct desk_occasion_conf *c)
 {
 	bool was = g_conf.weather;
 	g_conf = *c;
+	/* location = lat,lon in shell.conf: the house is there, not at the
+	 * time zone's city */
+	static bool had_loc;
+	if (c->have_loc) {
+		if (!had_loc || c->lat != g_lat || c->lon != g_lon) {
+			g_lat = c->lat;
+			g_lon = c->lon;
+			g_asked_at = -1e9;
+			wlr_log(WLR_INFO, "occasion: the house is at %.2f, %.2f (shell.conf)", g_lat, g_lon);
+		}
+	} else if (had_loc) {
+		locate();
+		g_asked_at = -1e9;
+	}
+	had_loc = c->have_loc;
 	if (was && !c->weather) {
 		pthread_mutex_lock(&g_wx_lock);
 		g_have_wx = false;
@@ -521,7 +579,12 @@ static void test_weather(void)
 void desk_occasion_init(struct wl_event_loop *loop, void (*changed)(void *data), void *data)
 {
 	g_started = mono();
-	locate();
+	if (g_conf.have_loc) {   /* shell.conf was read first: its location wins */
+		g_lat = g_conf.lat;
+		g_lon = g_conf.lon;
+	} else {
+		locate();
+	}
 	test_clock();
 	test_weather();
 	g_changed = changed;

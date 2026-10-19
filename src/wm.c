@@ -222,6 +222,9 @@ struct shell_conf {
 	bool gfx_own;               /* and chosen in the user's own file, not the machine's */
 	bool reading_own;           /* (the user's own file is being read) */
 	int bday_month, bday_day;   /* the birthday; 0 for none */
+	bool have_loc;              /* location = lat,lon */
+	double loc_lat, loc_lon;
+	char bell[128];             /* the program the bell on the desk brings; "" no bell */
 	bool celebrations;          /* days kept: the door dressed, the clock's shows */
 	bool weather;               /* the door out in the real weather (asked for) */
 	int screen_off;             /* minutes untouched before the screen goes dark; 0 never */
@@ -719,6 +722,14 @@ struct desk_server {
 		/* the card's menu: the wheel's part-notches, so a trackpad glides */
 		double card_scroll;
 	} slp;
+	/* the bell on the desk (shell.conf's bell): the hand on it, the brass
+	 * coming up under it, when it was last struck and last started what
+	 * it brings */
+	struct {
+		bool hot, animating;
+		double lift, anim_at;
+		double struck_at, started_at;
+	} bell;
 	struct wlr_scene_tree *drag_icon;
 	struct wl_list keyboards;
 	struct wl_list pointers;            /* struct desk_pointer */
@@ -9933,7 +9944,12 @@ static void terminal_open(void)
  *   keyboard_switch = alt_shift | super_space | ctrl_shift | caps_lock
  *                                         the keys that change between them
  *   key_repeat = slow | normal | fast     how soon a held key repeats, and
- *                                         how fast */
+ *                                         how fast
+ *   bell = none | <desktop file id>       a brass bell on the tray, between
+ *                                         the clock and the post box, that
+ *                                         brings that program: its window
+ *                                         to the front, or the program
+ *                                         started (none, no bell) */
 
 static void shell_conf_path(char *out, size_t n)
 {
@@ -10013,6 +10029,8 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->gfx = DESK_GFX_HIGH;
 	c->gfx_own = false;
 	c->bday_month = c->bday_day = 0;
+	c->have_loc = false;
+	c->bell[0] = '\0';
 	c->celebrations = true;
 	c->weather = true;
 	c->screen_off = 10;
@@ -10121,6 +10139,32 @@ static bool conf_other(struct shell_conf *c, const char *path, const char *key, 
 		} else {
 			wlr_log(WLR_ERROR, "%s: language is auto, en, ja, zh, ko, es, fr or de, not \"%s\"",
 				path, val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "bell")) {
+		/* grok-bot.desktop: the program a bell on the desk brings;
+		 * nothing, or none, for no bell */
+		if (!*val || !strcasecmp(val, "none") || !strcasecmp(val, "no")) {
+			c->bell[0] = '\0';
+		} else {
+			snprintf(c->bell, sizeof c->bell, "%s", val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "location")) {
+		/* -26.18,-58.17: latitude, longitude; nothing or auto for the
+		 * time zone's city */
+		double la, lo;
+		if (!*val || !strcasecmp(val, "auto") || !strcasecmp(val, "none")) {
+			c->have_loc = false;
+		} else if (sscanf(val, "%lf , %lf", &la, &lo) == 2 && la >= -90 && la <= 90
+			&& lo >= -180 && lo <= 180) {
+			c->have_loc = true;
+			c->loc_lat = la;
+			c->loc_lon = lo;
+		} else {
+			wlr_log(WLR_ERROR, "%s: location is lat,lon or auto, not \"%s\"", path, val);
 		}
 		return true;
 	}
@@ -10493,6 +10537,8 @@ static int gfx_wanted(const struct desk_server *server)
 	return server->on_cpu && !c->gfx_own ? DESK_GFX_2D : c->gfx;
 }
 
+static void bell_publish(struct desk_server *server);
+
 /* Once a second: read again if it has changed since it was last read. */
 static void shell_conf_poll(struct desk_server *server)
 {
@@ -10545,8 +10591,10 @@ static void shell_conf_poll(struct desk_server *server)
 	if (gfx_changed) {
 		gfx_switch(server);
 	}
-	struct desk_occasion_conf oc = { c->bday_month, c->bday_day, c->celebrations, c->weather };
+	struct desk_occasion_conf oc = { c->bday_month, c->bday_day, c->celebrations, c->weather,
+		c->have_loc, c->loc_lat, c->loc_lon };
 	desk_occasion_conf(&oc);
+	bell_publish(server);
 	if (!first && locked(server)) {
 		paint_lock(server);
 		server_schedule_frames(server);
@@ -14338,6 +14386,7 @@ static void clock_publish(struct desk_server *server)
 	st.volume = m.volume > 1.0 ? 1.0 : m.volume;
 	st.muted = m.muted;
 	st.supply = server->clk.supply;
+	desk_occasion_weather_now(&st.wx);
 	st.avg_w = server->clk.n_all > 0 ? server->clk.sum_all / server->clk.n_all : -1.0;
 	st.hour_wh = -1.0;
 	if (server->clk.hist_n > 0) {
@@ -19526,11 +19575,200 @@ static void paper_press(struct desk_server *server, struct wlr_pointer_button_ev
 /* The pointer gone over to a screen beside the desk's: whatever on the
  * desk's own screen it was over -- a thing on the desk, a binder, a
  * control, a letter -- is let go of. */
+/* ---- the bell on the desk -------------------------------------------
+ *
+ * shell.conf's bell = <desktop id> puts a brass service bell on the tray
+ * (draw.c draws it, as the DESK_OVL_BELL overlay). Struck, it brings that
+ * program: its window to the front -- unfolded, if it was folded away --
+ * or, with none, the program started the way the drawer starts one. */
+
+/* Two names for the same program: a desktop id with or without
+ * ".desktop", an app id or an X class -- in any case. */
+static bool bell_same(const char *a, const char *b)
+{
+	if (!a || !b) {
+		return false;
+	}
+	size_t na = strlen(a), nb = strlen(b);
+	if (na > 8 && !strcasecmp(a + na - 8, ".desktop")) {
+		na -= 8;
+	}
+	if (nb > 8 && !strcasecmp(b + nb - 8, ".desktop")) {
+		nb -= 8;
+	}
+	return na == nb && !strncasecmp(a, b, na);
+}
+
+/* The program, by its desktop id with or without ".desktop". */
+static const struct desk_app *bell_app(const struct desk_app_list *l, const char *id)
+{
+	const struct desk_app *app = desk_apps_find(l, id);
+	if (!app) {
+		char full[160];
+		snprintf(full, sizeof full, "%s.desktop", id);
+		app = desk_apps_find(l, full);
+	}
+	return app;
+}
+
+static bool bell_view_is(const struct desk_toplevel *view, const char *id)
+{
+	char vid[128];
+	if (view_app_id(view, vid, sizeof vid) && bell_same(vid, id)) {
+		return true;
+	}
+	/* and by what the window says of itself, should no desktop file own
+	 * up to it */
+	if (view->xdg_toplevel && bell_same(view->xdg_toplevel->app_id, id)) {
+		return true;
+	}
+#ifdef DESK_HAVE_XWAYLAND
+	if (view->xsurface && bell_same(view->xsurface->class, id)) {
+		return true;
+	}
+#endif
+	return false;
+}
+
+/* What it shows, handed to the painter, and painted if that comes out
+ * different. */
+static void bell_publish(struct desk_server *server)
+{
+	const char *id = server->conf.bell;
+	bool shown = id[0] != '\0';
+	char name[96] = "";
+	if (shown) {
+		const struct desk_app_list *l = desk_apps_acquire();
+		const struct desk_app *app = bell_app(l, id);
+		snprintf(name, sizeof name, "%.95s", app ? app->name : id);
+		desk_apps_release(l);
+	}
+	bool was = desk_bell_shown();
+	double press = 0.0;
+	double since = monotonic_sec() - server->bell.struck_at;
+	if (since >= 0.0 && since < 0.32) {
+		/* down fast, and back up on its spring */
+		press = since < 0.06 ? since / 0.06 : 1.0 - (since - 0.06) / 0.26;
+	}
+	desk_bell_set(shown, name, server->bell.lift, press);
+	if (was != shown) {
+		if (shown) {
+			wlr_log(WLR_INFO, "the bell: on the desk, for %s", id);
+		} else {
+			wlr_log(WLR_INFO, "the bell: put away");
+		}
+		/* the tray reaches as far as the bell does (once there is a desk
+		 * laid out to keep windows off) */
+		if (server->ovl_placed) {
+			windows_keep_off_tray(server);
+		}
+	}
+	struct desk_sprite *sp = &server->ovl[DESK_OVL_BELL];
+	if (server->ovl_placed) {
+		uint64_t key = desk_overlay_key(DESK_OVL_BELL, 0, 0);
+		if (!sp->drawn || sp->key != key) {
+			sp->key = key;
+			sprite_draw(server, DESK_OVL_BELL, time(NULL), post_unread());
+			overlay_place(server);
+			server_schedule_frames(server);
+		}
+	}
+}
+
+/* The hand over it (can_touch: nothing lies over the desk there). */
+static bool bell_track(struct desk_server *server, bool can_touch)
+{
+	bool hot = can_touch && server->conf.bell[0] && desk_bell_hit(server->desk_w,
+		server->desk_h, server->cursor->x, server->cursor->y, server->drawer_t);
+	if (hot != server->bell.hot) {
+		server->bell.hot = hot;
+		server->bell.anim_at = monotonic_sec();
+		server->bell.animating = true;
+		server_schedule_frames(server);
+	}
+	return hot;
+}
+
+/* Struck: what it is for. */
+static void bell_ring(struct desk_server *server)
+{
+	const char *id = server->conf.bell;
+	server->bell.struck_at = monotonic_sec();
+	server->bell.animating = true;
+	snd_at(server, DESK_SND_BELL, server->cursor->x, 0.55);
+	/* the program's window, the front one first */
+	struct desk_toplevel *view;
+	wl_list_for_each(view, &server->toplevels, link) {
+		if (!view->scene_tree || view->unmanaged || !bell_view_is(view, id)) {
+			continue;
+		}
+		wlr_log(WLR_INFO, "the bell: %s to the front", id);
+		if (view->sheet.phase != SHEET_IDLE) {
+			sheet_begin_unfold(server, &view->sheet);
+		}
+		focus_toplevel(view);
+		server_schedule_frames(server);
+		return;
+	}
+	/* none: started -- once, while the first is on its way */
+	if (server->bell.struck_at - server->bell.started_at < 4.0) {
+		wlr_log(WLR_INFO, "the bell: %s is on its way already", id);
+		return;
+	}
+	const struct desk_app_list *l = desk_apps_acquire();
+	const struct desk_app *app = bell_app(l, id);
+	if (app) {
+		wlr_log(WLR_INFO, "the bell: starting %s", app->id);
+		desk_app_launch(app);
+		server->bell.started_at = server->bell.struck_at;
+	} else {
+		wlr_log(WLR_ERROR, "the bell: no program is called %s (shell.conf's bell)", id);
+	}
+	desk_apps_release(l);
+	server_schedule_frames(server);
+}
+
+static void bell_press(struct desk_server *server, uint32_t button, bool *taken)
+{
+	*taken = false;
+	if (button != BTN_LEFT || !server->conf.bell[0] || !desk_bell_hit(server->desk_w,
+			server->desk_h, server->cursor->x, server->cursor->y, server->drawer_t)) {
+		return;
+	}
+	*taken = true;
+	bell_ring(server);
+}
+
+/* Once a frame while it moves: the brass coming up under the hand and
+ * going back, and the plunger. */
+static void bell_tick_frame(struct desk_server *server)
+{
+	if (!server->bell.animating) {
+		return;
+	}
+	double now = monotonic_sec();
+	double dt = clampf_d(now - server->bell.anim_at, 0.0, 0.05);
+	server->bell.anim_at = now;
+	double to = server->bell.hot ? 1.0 : 0.0;
+	double k = gfx_flat() ? 1.0 : 1.0 - exp(-dt / (to > server->bell.lift ? 0.06 : 0.12));
+	server->bell.lift += (to - server->bell.lift) * k;
+	if (fabs(to - server->bell.lift) < 0.01) {
+		server->bell.lift = to;
+	}
+	bool more = server->bell.lift != to || now - server->bell.struck_at < 0.34;
+	bell_publish(server);
+	server->bell.animating = more;
+	if (more) {
+		server_schedule_frames(server);
+	}
+}
+
 static void desk_hover_off(struct desk_server *server)
 {
 	drawer_hover_to(server, -1);
 	clock_track(server, false);
 	slips_track(server, false);
+	bell_track(server, false);
 	if (shelf_up(server) && server->shelf_binder < 0) {
 		hover_set(server, -1);
 	}
@@ -19708,7 +19946,8 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 	}
 	bool on_clock = clock_track(server, !window_under(server));
 	bool on_slip = slips_track(server, !window_under(server));
-	drawer_hover_to(server, window_under(server) || on_clock || on_slip ? -1
+	bool on_bell = bell_track(server, !window_under(server));
+	drawer_hover_to(server, window_under(server) || on_clock || on_slip || on_bell ? -1
 		: drawer_entry_at(server, server->cursor->x, server->cursor->y));
 	/* with the drawer out, the paper on the desk is not in reach */
 	if (server->drawer_t > 0.004) {
@@ -20076,6 +20315,10 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			return;
 		}
 		slips_press(server, event->button, &taken);
+		if (taken) {
+			return;
+		}
+		bell_press(server, event->button, &taken);
 		if (taken) {
 			return;
 		}
@@ -20491,6 +20734,7 @@ static void output_frame_work(struct desk_server *server)
 	desk_follow(server);
 	clock_tick_frame(server);
 	slips_tick_frame(server);
+	bell_tick_frame(server);
 }
 
 static void output_frame(struct wl_listener *listener, void *data)
