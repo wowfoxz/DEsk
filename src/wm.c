@@ -16420,13 +16420,16 @@ static void lock_look(const struct desk_server *server, struct desk_lock_look *l
 }
 
 /* How often what moves at the door is drawn: thirty times a second, and
- * fifteen on Low; at Ultra every frame. In 2D it does not move at all
- * (paint_lock_fx). */
+ * fifteen on Low; at Ultra, or with the door on the GPU, every frame. In 2D
+ * it does not move at all (paint_lock_fx). */
 static double lock_fx_period(const struct desk_server *server)
 {
 	(void)server;
 	enum desk_gfx g = desk_gfx_level();
-	return g == DESK_GFX_ULTRA ? 0.0 : g <= DESK_GFX_LOW ? 1.0 / 15.0 : 1.0 / 30.0;
+	if (g == DESK_GFX_ULTRA || desk_lock_gpu()) {
+		return 0.0;
+	}
+	return g <= DESK_GFX_LOW ? 1.0 / 15.0 : 1.0 / 30.0;
 }
 
 /* what moves out at the door, on its own sheet over it */
@@ -16442,7 +16445,7 @@ static void paint_lock_fx(struct desk_server *server, const struct desk_lock_loo
 		return;
 	}
 	int ow, oh;
-	desk_overlay_size(w, h, &ow, &oh);
+	desk_lock_size(w, h, &ow, &oh);
 	struct desk_buf *buf = buf_create(ow, oh);
 	cairo_save(buf->cr);
 	cairo_scale(buf->cr, (double)ow / w, (double)oh / h);
@@ -16486,7 +16489,7 @@ static void paint_lock(struct desk_server *server)
 	struct lock_args a;
 	lock_look(server, &a.look);
 	int ow, oh;
-	desk_overlay_size(w, h, &ow, &oh);
+	desk_lock_size(w, h, &ow, &oh);
 	struct desk_buf *buf = buf_create(ow, oh);
 	cairo_save(buf->cr);
 	cairo_scale(buf->cr, (double)ow / w, (double)oh / h);
@@ -16665,9 +16668,9 @@ static void lock_request(struct desk_server *server)
 	if (locked(server)) {
 		return;
 	}
-	if (desk_gfx_level() <= DESK_GFX_LOW) {
+	if (desk_gfx_level() <= DESK_GFX_LOW && !desk_lock_gpu()) {
 		/* Low and 2D: no walk out to it, traced as it goes -- the door,
-		 * at once */
+		 * at once (on the GPU the walk costs nothing like that) */
 		lock_begin(server, LOCK_COME_NOW, NULL, LOCK_FROM_ELSEWHERE);
 		return;
 	}

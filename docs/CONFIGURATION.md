@@ -129,7 +129,29 @@ org.kde.kate.desktop = Development
 Shelves: `Development`, `Internet`, `Office`, `Graphics`, `Media`, `Games`,
 `Utilities`, `System`.
 
-## Environment variables
+## The front door
+
+The door (the lock, and leaving) is traced on the GPU when the room is,
+on a thread and GL context of its own, and on the CPU otherwise: with
+`DESK_NO_GPU` or `DESK_DOOR_CPU`, on a software renderer (llvmpipe), when
+the room's own GPU check found the driver unfit, if the GPU fails at any
+point (from then on until DEsk restarts), and while the door's shader is
+first being compiled. That first compile takes about half a minute; the
+driver keeps it (NVIDIA in `~/.nv`, Mesa in `~/.cache/mesa_shader_cache`),
+so afterwards it is ready at once. Both draw the same door; the GPU's
+frames match the CPU's finest to within rounding.
+
+What `graphics` gives up for the door only spares the CPU, so on the GPU
+none of it applies and the door is drawn in full at every level:
+
+| | CPU | GPU |
+| --- | --- | --- |
+| Size | no larger than the room's overlays (1280 wide at `medium`, 960 at `low`, 640 at `2d`) | the screen's own |
+| While the eye moves | 50 to 85% of that, as keeps about 30 frames a second; finely only once it stops | the whole size, every edge smoothed, every frame; only if a frame takes over 25 ms (a dressed door at night on a small GPU) smaller while moving, never under half, and the whole size again as soon as it stops |
+| At `2d` | half size again | the whole size |
+| The walk up to the door | not at `low` or `2d` | at every level |
+| Rain, snow, lights | 30 times a second (15 at `low`) | every frame |
+
 
 For users:
 
@@ -157,7 +179,12 @@ For development and testing:
 | `DESK_WEATHER` | Pretend the weather is `clear`, `clouds`, `overcast`, `fog`, `rain`, `snow` or `storm` (`rain:0.8` for how heavy). |
 | `DESK_LOCK_PAM_DIR` | Check the lock's password against this PAM directory (only when not the real session). |
 | `DESK_ROOM_GLSL` | Load the room's shader from this file. |
-| `DESK_GPU_DUMP` | Write the shader as the driver receives it. |
+| `DESK_GPU_DUMP` | Write the shader as the driver receives it (the door's as `.door0` and `.door2` to `.door6` beside it). |
+| `DESK_DOOR_CPU` | Trace the front door on the CPU (the room stays on the GPU). |
+| `DESK_DOOR_GLSL` | Load the door's shader (`src/door.glsl`) from this file. |
+| `DESK_DOOR_PROFILE` | Log how long each stage of each door frame took on the GPU. |
+| `DESK_LOCK_FINE` | Trace every door frame finely at the whole size, on the CPU too, and never smaller on the GPU (slow on the CPU; what the GPU is compared with). |
+| `DESK_LOCK_BENCH` | For `desk-preview --lock`: trace each frame this many times more and give the mean. |
 | `DESK_SOUND_DEBUG` | Log each sound's latency. |
 | `DESK_SYSFS` | Read the Control Panel's instruments from this directory instead of `/sys`. |
 

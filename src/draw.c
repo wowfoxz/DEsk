@@ -59,6 +59,8 @@
 #ifdef DESK_HAVE_GPU
 #include "gpu.h"
 #include "room_glsl.h"
+#include "doorgpu.h"
+#include "door_glsl.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -5015,6 +5017,26 @@ static void room_gpu_remember(struct desk_gpu *g, bool ok, const char *why)
 		}
 		fclose(f);
 	}
+}
+
+/* Whether the front door may be traced on this GPU (doorgpu.h): not on a
+ * rasterizer running on the CPU, where the CPU tracer is as quick, and
+ * not on a driver the room's own trial has found falls over (the door's
+ * program is the same sort of thing, smaller). Asked on the door's thread
+ * with its GPU open. */
+static bool door_gpu_allowed(struct desk_gpu *g, char *why, size_t whysz)
+{
+	if (desk_gpu_software(g)) {
+		snprintf(why, whysz, "%s is a software rasterizer", desk_gpu_name(g));
+		return false;
+	}
+	char rwhy[400] = "";
+	if (room_gpu_verdict(g, rwhy, sizeof rwhy) == 0) {
+		snprintf(why, whysz, "%s failed the room's trial%s%s", desk_gpu_name(g),
+			rwhy[0] ? ": " : "", rwhy);
+		return false;
+	}
+	return true;
 }
 
 /* 1 the child built and traced the room and it agreed, 0 it did not or
@@ -35002,6 +35024,11 @@ static struct {
 	struct lk_frame rest, last;
 	int still;
 	double scale;      /* of the screen's pixels, while the eye moves */
+	double ms;         /* how long the last frame traced took */
+	bool gpu;          /* and whether it was on the GPU */
+	struct lk_frame gpu_last;   /* the last the GPU traced (lk_gpu_frame_for) */
+	int gpu_w, gpu_h;  /* the whole size gpu_last stands for */
+	double gpu_scale;  /* of it, while the eye moves (1 unless it is slow) */
 } g_lock;
 
 static void lk_bg_collect(bool wait);
@@ -35019,6 +35046,7 @@ void desk_lock_forget(void)
 	lk_bg_collect(true);
 	lk_frame_drop(&g_lock.rest);
 	lk_frame_drop(&g_lock.last);
+	lk_frame_drop(&g_lock.gpu_last);
 	if (g_lock.sign) {
 		cairo_surface_destroy(g_lock.sign);
 	}
@@ -35213,7 +35241,9 @@ static void lk_bg_collect(bool wait)
 bool desk_lock_settling(void)
 {
 	lk_bg_collect(false);
-	return g_lk_bg.running;
+	/* or a GPU frame that was traced smaller while the eye moved, to be
+	 * traced again at the whole size now that it has stopped */
+	return g_lk_bg.running || (g_lock.gpu && g_lock.gpu_last.img && !g_lock.gpu_last.fine);
 }
 
 void desk_lock_settle(void)
@@ -35257,19 +35287,25 @@ static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *c
 		/* to begin with, about a third of a million pixels */
 		g_lock.scale = clampf(sqrt(0.35e6 / ((double)W * H)), 0.50, 0.85);
 	}
-	double s = g_lock.scale;
+	/* DESK_LOCK_FINE: every frame as the one at rest is, the whole size and
+	 * its edges done finely -- slow, but what the GPU's look is held to */
+	bool fine = getenv("DESK_LOCK_FINE") != NULL;
+	double s = fine ? 1.0 : g_lock.scale;
 	int fw = (int)ceil(W * s), fh = (int)ceil(H * s);
 	struct lk_cam fc = *cam;
 	fc.f *= k * s;
 	fc.cx *= k * s;
 	fc.cy *= k * s;
 	double t0 = lk_now();
-	cairo_surface_t *img = lk_trace(sc, &fc, fw, fh, false);
+	cairo_surface_t *img = lk_trace(sc, &fc, fw, fh, fine);
 	double dt = lk_now() - t0;
+	g_lock.ms = dt * 1000.0;
 	/* hold the frame rate: about 25 ms a frame */
 	/* (local: finer while moving, about 33 ms a frame, never under half) */
-	g_lock.scale = clampf(g_lock.scale * clampf(sqrt(0.033 / fmax(dt, 1e-4)), 0.8, 1.2),
-		0.50, 0.85);
+	if (!fine) {
+		g_lock.scale = clampf(g_lock.scale * clampf(sqrt(0.033 / fmax(dt, 1e-4)), 0.8, 1.2),
+			0.50, 0.85);
+	}
 	lk_frame_drop(f);
 	f->img = img;
 	f->cam = *cam;
@@ -35278,11 +35314,419 @@ static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *c
 	f->lamp = sc->lamp;
 	f->post = sc->post;
 	f->mood = sc->rig.key;
-	f->fine = false;
-	if (at_rest) {
+	f->fine = fine;
+	if (at_rest && !fine) {
 		lk_bg_start(sc, cam, W, H, k, true, inside);
 	}
 	return f;
+}
+
+/* ---- the door on the GPU ----
+ *
+ * The same scene, traced by door.glsl on a thread of its own (doorgpu.h):
+ * every frame at the screen's own size with its edges done finely and the
+ * glow on it, which is what the CPU only gets to once the eye has stopped.
+ * So none of what the CPU does to keep up applies to it -- the coarse
+ * frame while moving, the finer one on the side, half the size in 2D, the
+ * overlay's cap at Low and Medium -- and the CPU tracer above stays the
+ * reference, and draws the door until the programs are compiled, or for
+ * good if they are not (DESK_DOOR_CPU=1 asks for that). */
+
+__attribute__((unused, format(printf, 1, 2))) static void lk_log(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	fputs("desk: door: ", stderr);
+	vfprintf(stderr, fmt, ap);
+	fputc('\n', stderr);
+	va_end(ap);
+}
+
+#ifdef DESK_HAVE_GPU
+/* the numbers door.glsl shares with the C above, handed over as #defines */
+#define DOOR_GLSL_FLOATS(X) \
+	X(LK_OW) X(LK_OH) X(LK_CW) X(LK_CZ) X(LK_WALL) X(LK_DW) X(LK_DH) X(LK_DT) X(LK_DY) \
+	X(LK_DZ) X(LK_HX) X(LK_HZ) X(LK_SWING) X(LK_STILE) X(LK_MID) X(LK_PANEL0) X(LK_RAIL0) \
+	X(LK_GLASS0) X(LK_GLASS1) X(LK_MUNTIN) X(LK_SIGN_X) X(LK_SIGN_Y) X(LK_SIGN_W) \
+	X(LK_SIGN_H) X(LK_SIGN_T) X(LK_SIGN_TILT) X(LK_CORD_X) X(LK_NAIL_Y) X(LK_PL_X0) \
+	X(LK_PL_X1) X(LK_PL_Y0) X(LK_PL_Y1) X(LK_PL_T) X(LK_WIN_X0) X(LK_WIN_X1) X(LK_WIN_Y0) \
+	X(LK_WIN_Y1) X(LK_KEY_X) X(LK_KEY_Y) X(LK_KNOB_X) X(LK_KNOB_Y) X(LK_ROOM_Z) \
+	X(LK_EXPOSURE) X(RM_TOP_T) X(RM_DR_HX) X(RM_DR_TOP) X(RM_DR_BOT)
+
+static void door_glsl_build(struct glsl_buf *b, int pass)
+{
+	locale_t c_loc = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+	locale_t prev = c_loc ? uselocale(c_loc) : (locale_t)0;
+	gb_put(b, "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+		"precision highp sampler2D;\n#define DOOR_PASS %d\n", pass);
+#define GB_FLT(n) gb_def(b, #n, (double)(n));
+	DOOR_GLSL_FLOATS(GB_FLT)
+#undef GB_FLT
+	gb_put(b, "#define LKD_MAX %d\n#define ROOM_SEED_ROW %d\n#line 1\n", LKD_MAX, ROOM_SEED_ROW);
+	if (c_loc) {
+		uselocale(prev);
+		freelocale(c_loc);
+	}
+	/* DESK_DOOR_GLSL: the shader's text from a file, to work on it */
+	const char *path = getenv("DESK_DOOR_GLSL");
+	FILE *f = path && *path ? fopen(path, "rbe") : NULL;
+	if (f) {
+		char chunk[8192];
+		size_t got;
+		while ((got = fread(chunk, 1, sizeof chunk - 1, f)) > 0) {
+			chunk[got] = '\0';
+			gb_put(b, "%s", chunk);
+		}
+		fclose(f);
+		return;
+	}
+	gb_put(b, "%s", DOOR_GLSL);
+}
+
+void desk_lock_gpu_warm(void)
+{
+	static bool tried;
+	if (tried) {
+		return;
+	}
+	tried = true;
+	if (getenv("DESK_DOOR_CPU") || getenv("DESK_NO_GPU")) {
+		lk_log("%s is set; traced on the CPU", getenv("DESK_DOOR_CPU") ? "DESK_DOOR_CPU"
+			: "DESK_NO_GPU");
+		return;
+	}
+	char *src[DOOR_GPU_PASSES] = { NULL };
+	for (int p = 0; p < DOOR_GPU_PASSES; p++) {
+		if (p == 1) {
+			continue;   /* the trace's second stage: the first's program */
+		}
+		struct glsl_buf b = { 0 };
+		door_glsl_build(&b, p);
+		if (b.bad) {
+			free(b.s);
+			b.s = NULL;
+		}
+		src[p] = b.s;
+		/* the program as the driver is handed it: DESK_GPU_DUMP=/tmp/x
+		 * names /tmp/x.door0 and .door2 to .door6 (pass 1 is pass 0's) */
+		const char *dump = getenv("DESK_GPU_DUMP");
+		if (dump && *dump && b.s) {
+			char path[1024];
+			snprintf(path, sizeof path, "%s.door%d", dump, p);
+			FILE *f = fopen(path, "we");
+			if (f) {
+				fputs(b.s, f);
+				fclose(f);
+			}
+		}
+	}
+	door_gpu_start(src, door_gpu_allowed);
+}
+
+bool desk_lock_gpu(void)
+{
+	desk_lock_gpu_warm();
+	static int said = DOOR_GPU_OFF;
+	int s = door_gpu_state();
+	if (s != said && (s == DOOR_GPU_READY || s == DOOR_GPU_DEAD)) {
+		said = s;
+		if (s == DOOR_GPU_READY) {
+			lk_log("traced on %s (%s)", door_gpu_name(), door_gpu_why());
+		} else {
+			lk_log("not on the GPU: %s; traced on the CPU", door_gpu_why());
+		}
+	}
+	return s == DOOR_GPU_READY;
+}
+
+bool desk_lock_gpu_wait(double secs)
+{
+	desk_lock_gpu_warm();
+	door_gpu_wait(secs);
+	return desk_lock_gpu();
+}
+
+static void lk_gpu_tex(struct door_gpu_tex *d, const struct lk_tex *t)
+{
+	d->px = t->px;
+	d->w = t->w;
+	d->h = t->h;
+	d->stride = t->stride;
+	d->a8 = t->a8;
+}
+
+/* the scene and the eye as door.glsl's uniforms; cam in the frame's pixels */
+static void lk_gpu_uniforms(struct door_gpu_frame *fr, const struct lk_scene *sc,
+	const struct lk_cam *c)
+{
+#define F1(n, v) do { float t_ = (float)(v); door_gpu_f(fr, n, 1, 1, &t_); } while (0)
+#define F2(n, a, b) do { float t_[2] = { (float)(a), (float)(b) }; door_gpu_f(fr, n, 2, 1, t_); } while (0)
+#define F3(n, a, b, cc) do { float t_[3] = { (float)(a), (float)(b), (float)(cc) }; \
+	door_gpu_f(fr, n, 3, 1, t_); } while (0)
+#define F4(n, a, b, cc, d) do { float t_[4] = { (float)(a), (float)(b), (float)(cc), (float)(d) }; \
+	door_gpu_f(fr, n, 4, 1, t_); } while (0)
+#define V3(n, v) F3(n, (v).x, (v).y, (v).z)
+#define I1(n, v) do { int t_ = (int)(v); door_gpu_i(fr, n, 1, &t_); } while (0)
+	V3("u_eye", c->eye);
+	F1("u_yaw", c->yaw);
+	F1("u_pitch", c->pitch);
+	F1("u_f", c->f);
+	F2("u_c", c->cx, c->cy);
+
+	F1("u_cd", sc->cd);
+	F1("u_sd", sc->sd);
+	F1("u_key", sc->key);
+	F1("u_lamp", sc->lamp);
+	F1("u_open", sc->open);
+	I1("u_rough", 0);     /* every frame the fine one */
+	F4("u_pic", sc->pic_x0, sc->pic_y0, sc->pic_w, sc->pic_h);
+	F3("u_roomb", sc->room_hx, sc->room_y0, sc->room_y1);
+	float e[15];
+	for (int i = 0; i < 5; i++) {
+		e[i * 3] = (float)sc->edge[i].x;
+		e[i * 3 + 1] = (float)sc->edge[i].y;
+		e[i * 3 + 2] = (float)sc->edge[i].z;
+	}
+	door_gpu_f(fr, "u_edge", 3, 5, e);
+	I1("u_ndeco", sc->ndeco);
+	I1("u_wreath", sc->wreath);
+	int dk[LKD_MAX], dd[LKD_MAX];
+	float dlo[LKD_MAX * 3], dhi[LKD_MAX * 3];
+	for (int i = 0; i < LKD_MAX; i++) {
+		const struct lkd_group *g = &sc->deco[i];
+		dk[i] = g->kind;
+		dd[i] = g->door;
+		dlo[i * 3] = (float)g->lo.x;
+		dlo[i * 3 + 1] = (float)g->lo.y;
+		dlo[i * 3 + 2] = (float)g->lo.z;
+		dhi[i * 3] = (float)g->hi.x;
+		dhi[i * 3 + 1] = (float)g->hi.y;
+		dhi[i * 3 + 2] = (float)g->hi.z;
+	}
+	door_gpu_i(fr, "u_deco_kind", LKD_MAX, dk);
+	door_gpu_i(fr, "u_deco_door", LKD_MAX, dd);
+	door_gpu_f(fr, "u_deco_lo", 3, LKD_MAX, dlo);
+	door_gpu_f(fr, "u_deco_hi", 3, LKD_MAX, dhi);
+
+	const struct lk_rig *r = &sc->rig;
+	F1("u_porch", r->porch);
+	F1("u_lantern", r->lantern);
+	F1("u_glass", r->glass);
+	F1("u_sun_soft", r->sun_soft);
+	F1("u_wet", r->wet);
+	F1("u_snow", r->snow);
+	F1("u_haze_k", r->haze_k);
+	F1("u_exposure", r->exposure);
+	V3("u_sun", r->sun);
+	V3("u_sun_col", r->sun_col);
+	V3("u_moon_col", r->moon_col);
+	V3("u_amb_lo", r->amb_lo);
+	V3("u_amb_hi", r->amb_hi);
+	V3("u_sky_hi", r->sky_hi);
+	V3("u_sky_lo", r->sky_lo);
+	V3("u_gnd_hi", r->gnd_hi);
+	V3("u_gnd_lo", r->gnd_lo);
+	V3("u_haze", r->haze);
+
+	const struct lk_room *rm = &sc->room;
+	I1("u_room_on", rm->on);
+	V3("u_rm_t", rm->t);
+	F1("u_rm_s", rm->s);
+	F4("u_rm_shell", rm->wx, rm->fy, rm->cy, rm->bz);
+	F1("u_rm_fz", rm->fz);
+	I1("u_rm_nbox", rm->nbox);
+	float blo[36], bhi[36];
+	int bk[12];
+	for (int i = 0; i < 12; i++) {
+		blo[i * 3] = (float)rm->box[i].lo.x;
+		blo[i * 3 + 1] = (float)rm->box[i].lo.y;
+		blo[i * 3 + 2] = (float)rm->box[i].lo.z;
+		bhi[i * 3] = (float)rm->box[i].hi.x;
+		bhi[i * 3 + 1] = (float)rm->box[i].hi.y;
+		bhi[i * 3 + 2] = (float)rm->box[i].hi.z;
+		bk[i] = rm->box[i].kind;
+	}
+	door_gpu_f(fr, "u_rm_lo", 3, 12, blo);
+	door_gpu_f(fr, "u_rm_hi", 3, 12, bhi);
+	door_gpu_i(fr, "u_rm_kind", 12, bk);
+	F3("u_rm_desk", rm->desk_hx, rm->desk_z0, rm->desk_z1);
+	V3("u_rm_wall", rm->wall);
+	V3("u_rm_ceil", rm->ceil);
+	int pon[3];
+	float peye[9], pww[9], puu[9], pvv[9], pfov[6], prect[12];
+	for (int k = 0; k < 3; k++) {
+		const struct lk_proj *pj = &rm->proj[k];
+		pon[k] = pj->on && pj->tex.px;
+		const vec3 *v[4] = { &pj->cam.eye, &pj->cam.ww, &pj->cam.uu, &pj->cam.vv };
+		float *o[4] = { peye, pww, puu, pvv };
+		for (int j = 0; j < 4; j++) {
+			o[j][k * 3] = (float)v[j]->x;
+			o[j][k * 3 + 1] = (float)v[j]->y;
+			o[j][k * 3 + 2] = (float)v[j]->z;
+		}
+		pfov[k * 2] = (float)pj->cam.fov_x;
+		pfov[k * 2 + 1] = (float)pj->cam.fov_y;
+		prect[k * 4] = (float)pj->x0;
+		prect[k * 4 + 1] = (float)pj->y0;
+		prect[k * 4 + 2] = (float)pj->sw;
+		prect[k * 4 + 3] = (float)pj->sh;
+	}
+	door_gpu_i(fr, "u_pj_on", 3, pon);
+	door_gpu_f(fr, "u_pj_eye", 3, 3, peye);
+	door_gpu_f(fr, "u_pj_ww", 3, 3, pww);
+	door_gpu_f(fr, "u_pj_uu", 3, 3, puu);
+	door_gpu_f(fr, "u_pj_vv", 3, 3, pvv);
+	door_gpu_f(fr, "u_pj_fov", 2, 3, pfov);
+	door_gpu_f(fr, "u_pj_rect", 4, 3, prect);
+
+	I1("u_has_sign", sc->sign.px != NULL);
+	I1("u_has_gold", sc->gold.px != NULL);
+	I1("u_has_plate", sc->plate.px != NULL);
+	I1("u_has_pic", sc->pic.px != NULL);
+	lk_gpu_tex(&fr->tex[0], &sc->sign);
+	lk_gpu_tex(&fr->tex[1], &sc->gold);
+	lk_gpu_tex(&fr->tex[2], &sc->plate);
+	lk_gpu_tex(&fr->tex[3], &sc->pic);
+	for (int k = 0; k < 3; k++) {
+		if (pon[k]) {
+			lk_gpu_tex(&fr->tex[4 + k], &rm->proj[k].tex);
+		}
+	}
+#undef F1
+#undef F2
+#undef F3
+#undef F4
+#undef V3
+#undef I1
+}
+
+/* The frame for cam, traced on the GPU at w x h times k; the last one if
+ * nothing has moved. NULL if the GPU could not, for the CPU to do it.
+ *
+ * Always finely and at the whole size, unless that is slow (a dressed door
+ * at night on a small GPU): then, only while the eye moves, as much smaller
+ * as holds about 25 ms a frame, never under half -- and once it stops, at
+ * the whole size again (desk_lock_settling asks for that frame). */
+static struct lk_frame *lk_gpu_frame_for(const struct lk_scene *sc, const struct lk_cam *cam,
+	int w, int h, double k)
+{
+	int W = (int)ceil(w * k), H = (int)ceil(h * k);
+	struct lk_frame *f = &g_lock.gpu_last;
+	bool same = f->img && g_lock.gpu_w == W && g_lock.gpu_h == H && lk_same(f, cam, sc);
+	if (same && f->fine) {
+		g_lock.gpu = true;
+		return f;
+	}
+	if (g_lock.gpu_scale <= 0.0 || getenv("DESK_LOCK_FINE")) {
+		g_lock.gpu_scale = 1.0;
+	}
+	/* still: the whole size; moving: as the last frames allowed */
+	double s = same ? 1.0 : g_lock.gpu_scale;
+	bool whole = s >= 1.0;
+	int fw = whole ? W : (int)ceil(W * s), fh = whole ? H : (int)ceil(H * s);
+	struct door_gpu_frame *fr = malloc(sizeof *fr);
+	if (!fr) {
+		return NULL;
+	}
+	struct lk_cam pc = *cam;
+	double ks = whole ? k : k * fw / W;
+	pc.f *= ks;
+	pc.cx *= ks;
+	pc.cy *= ks;
+	bool size = f->img && cairo_image_surface_get_width(f->img) == fw
+		&& cairo_image_surface_get_height(f->img) == fh;
+	W = fw;
+	H = fh;
+	door_gpu_frame_init(fr, W, H, (float)sc->post);
+	lk_gpu_uniforms(fr, sc, &pc);
+	cairo_surface_t *img = size ? f->img : cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
+	bool ok = cairo_surface_status(img) == CAIRO_STATUS_SUCCESS;
+	double ms = 0.0;
+	if (ok) {
+		cairo_surface_flush(img);
+		ok = door_gpu_render(fr, cairo_image_surface_get_data(img),
+			cairo_image_surface_get_stride(img), &ms);
+		cairo_surface_mark_dirty(img);
+	}
+	free(fr);
+	if (!ok) {
+		if (img != f->img) {
+			cairo_surface_destroy(img);
+		}
+		lk_frame_drop(f);
+		/* desk_lock_gpu says why, once, and is false from now on */
+		desk_lock_gpu();
+		return NULL;
+	}
+	if (img != f->img) {
+		lk_frame_drop(f);
+	}
+	f->img = img;
+	f->cam = *cam;
+	f->door = sc->door;
+	f->key = sc->key;
+	f->lamp = sc->lamp;
+	f->post = sc->post;
+	f->mood = sc->rig.key;
+	f->fine = whole;
+	g_lock.gpu_w = (int)ceil(w * k);
+	g_lock.gpu_h = (int)ceil(h * k);
+	g_lock.ms = ms;
+	g_lock.gpu = true;
+	if (!same && !getenv("DESK_LOCK_FINE")) {
+		/* about 25 ms a frame while moving: smaller only when slower */
+		double r = clampf(sqrt(25.0 / fmax(ms, 0.1)), 0.8, 1.25);
+		g_lock.gpu_scale = clampf(g_lock.gpu_scale * r, 0.5, 1.0);
+	}
+	return f;
+}
+#else
+void desk_lock_gpu_warm(void)
+{
+}
+
+bool desk_lock_gpu(void)
+{
+	return false;
+}
+
+bool desk_lock_gpu_wait(double secs)
+{
+	(void)secs;
+	return false;
+}
+
+static struct lk_frame *lk_gpu_frame_for(const struct lk_scene *sc, const struct lk_cam *cam,
+	int w, int h, double k)
+{
+	(void)sc;
+	(void)cam;
+	(void)w;
+	(void)h;
+	(void)k;
+	return NULL;
+}
+#endif
+
+/* The size to draw the door at for a w x h screen: its own on the GPU,
+ * where a frame costs about the same at any size; for the CPU, no finer
+ * than the room's overlays (desk_overlay_size). */
+void desk_lock_size(int screen_w, int screen_h, int *ow, int *oh)
+{
+	if (desk_lock_gpu()) {
+		*ow = screen_w;
+		*oh = screen_h;
+		return;
+	}
+	desk_overlay_size(screen_w, screen_h, ow, oh);
+}
+
+double desk_lock_last_ms(bool *gpu)
+{
+	if (gpu) {
+		*gpu = g_lock.gpu;
+	}
+	return g_lock.ms;
 }
 
 /* ---- what is drawn over the trace ---- */
@@ -35517,7 +35961,10 @@ void desk_draw_lock(cairo_t *cr, int w, int h, const struct desk_lock_look *lk)
 	double kx = 1.0, ky = 0.0;
 	cairo_user_to_device_distance(cr, &kx, &ky);
 	double k = clampf(hypot(kx, ky), 0.25, 3.0);
-	if (desk_gfx_level() == DESK_GFX_2D) {
+	/* on the GPU every frame is the fine one at the screen's size, at every
+	 * level: what follows for the CPU is only what it can afford */
+	bool gpu = desk_lock_gpu();
+	if (!gpu && desk_gfx_level() == DESK_GFX_2D) {
 		k = fmax(k * 0.5, 0.25);   /* traced at half the screen's size, once */
 	}
 	if (lk->push >= 0.999 && lk->inside) {
@@ -35549,7 +35996,11 @@ void desk_draw_lock(cairo_t *cr, int w, int h, const struct desk_lock_look *lk)
 	bool room = lk->inside && (lk->open > 0.0 || lk->push > 0.0)
 		&& lk_room_build(&sc.room, w, h, lk->inside_view, lk->inside, sc.edge, &end);
 	lk_camera_to(w, h, lk, room ? &end : NULL, &cam);
-	struct lk_frame *f = lk_frame_for(&sc, &cam, w, h, k, lk->inside);
+	struct lk_frame *f = gpu ? lk_gpu_frame_for(&sc, &cam, w, h, k) : NULL;
+	if (!f) {
+		g_lock.gpu = false;
+		f = lk_frame_for(&sc, &cam, w, h, k, lk->inside);
+	}
 	if (f->img) {
 		double iw = cairo_image_surface_get_width(f->img), ih = cairo_image_surface_get_height(f->img);
 		cairo_save(cr);

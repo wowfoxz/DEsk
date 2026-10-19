@@ -691,6 +691,13 @@ static int write_lock(const char *path, int w, int h)
 			what[i] = M[i].what;
 		}
 	}
+	/* the door on the GPU unless DESK_DOOR_CPU says not: wait for its
+	 * programs, so the sheet is all of one or the other */
+	bool gpu = desk_lock_gpu_wait(120.0);
+	printf("door traced on the %s\n", gpu ? "GPU" : "CPU");
+	/* DESK_LOCK_BENCH=n: each frame traced n times more, the eye moved a
+	 * hair each time so that nothing kept is shown, and the mean said */
+	int bench = getenv("DESK_LOCK_BENCH") ? atoi(getenv("DESK_LOCK_BENCH")) : 0;
 	const char *only = getenv("DESK_LOCK_FRAME");
 	int cols = 4, rows = 3, tw = w / 2, th = h / 2;
 	cairo_surface_t *sheet = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, tw * cols, th * rows);
@@ -712,9 +719,30 @@ static int write_lock(const char *path, int w, int h)
 			fine = (f1.tv_sec - f0.tv_sec) * 1e3 + (f1.tv_nsec - f0.tv_nsec) * 1e-6;
 			desk_draw_lock(cr, w, h, &looks[i]);
 		}
+		bool on_gpu = false;
+		double traced = desk_lock_last_ms(&on_gpu);
+		double mean = 0.0;
+		for (int b = 0; b < bench; b++) {
+			struct desk_lock_look l2 = looks[i];
+			l2.back += 1e-7 * (b + 1);
+			cairo_surface_t *s2 = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+			cairo_t *c2 = cairo_create(s2);
+			struct timespec b0, b1;
+			clock_gettime(CLOCK_MONOTONIC, &b0);
+			desk_draw_lock(c2, w, h, &l2);
+			clock_gettime(CLOCK_MONOTONIC, &b1);
+			mean += (b1.tv_sec - b0.tv_sec) * 1e3 + (b1.tv_nsec - b0.tv_nsec) * 1e-6;
+			cairo_destroy(c2);
+			cairo_surface_destroy(s2);
+		}
 		desk_draw_lock_fx(cr, w, h, &looks[i]);
-		printf("%-24s %.1f ms (fine %.0f ms)\n", what[i],
-			(t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) * 1e-6, fine);
+		printf("%-24s %.1f ms (fine %.0f ms) %s trace %.1f ms", what[i],
+			(t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) * 1e-6, fine,
+			on_gpu ? "gpu" : "cpu", traced);
+		if (bench > 0) {
+			printf(", %d more: %.1f ms a frame", bench, mean / bench);
+		}
+		printf("\n");
 		cairo_destroy(cr);
 		if (only && atoi(only) == i) {
 			cairo_surface_write_to_png(f, path);
