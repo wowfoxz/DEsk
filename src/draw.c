@@ -25653,6 +25653,7 @@ bool desk_clock_pick(int w, int h, double px, double py, double drawer_open,
 }
 
 static bool bell_box(int w, int h, double box[4]);
+static bool dlamp_box(int w, int h, double box[4]);
 
 bool desk_overlay_box(int which, int w, int h, double box[4])
 {
@@ -25661,6 +25662,9 @@ bool desk_overlay_box(int which, int w, int h, double box[4])
 	}
 	if (which == DESK_OVL_BELL) {
 		return bell_box(w, h, box);
+	}
+	if (which == DESK_OVL_LAMP) {
+		return dlamp_box(w, h, box);
 	}
 	if (which != DESK_OVL_CLOCK) {
 		return false;
@@ -30552,6 +30556,510 @@ static bool bell_tray_bottom(int w, int h, double *bottom)
 	return true;
 }
 
+/* ---- the reading lamp on the desk ---------------------------------
+ *
+ * A banker's lamp: a brass foot, a short brass stem, and a shade of green
+ * cased glass lying across it, with a brass pull chain hanging from the
+ * front of the shade. It stands in the corner past the post box, under
+ * the ALL APPS plate, and its chain is the switch for the light the desk
+ * is lit by: on, the room as it was traced; off, the room with that light
+ * gone (desk_draw_lamp_night) -- a dim, cool fill, everything on the desk
+ * still there to read. shell.conf's lamp keeps which, and a pull of the
+ * chain writes it there.
+ *
+ * Like the bell it is not traced with the room -- the room's key does not
+ * change when the light goes off, nothing is traced again, and the GPU's
+ * room and the processor's are the same room under it -- but drawn over
+ * it, by the same lamp, inside the tray as measured.
+ *
+ * Room units, before it is made smaller where the corner is tight. */
+#define DLAMP_FOOT 0.44       /* the foot's radius */
+#define DLAMP_FOOT_T 0.10     /* and how thick it is */
+#define DLAMP_H 0.92          /* the shade's middle, up off the desk */
+#define DLAMP_FWD 0.34        /* and how far in front of the foot */
+#define DLAMP_SHADE 1.12      /* half the shade's length */
+#define DLAMP_SHADE_R 0.34    /* the shade's half depth, front to back */
+#define DLAMP_CHAIN_X 0.66    /* the chain, along the shade from its middle */
+#define DLAMP_CHAIN_Y 0.30    /* how far down it hangs, off the desk */
+#define DLAMP_PULL 0.14       /* how much further down when it is pulled */
+
+static struct {
+	double lit;       /* 0 off .. 1 on */
+	double lift;      /* 0 at rest .. 1 the hand on it */
+	double pull;      /* 0 the chain at rest .. 1 pulled right down */
+} g_dlamp = { 1.0, 0.0, 0.0 };
+
+void desk_lamp_set(double lit, double lift, double pull)
+{
+	g_dlamp.lit = clampf(lit, 0.0, 1.0);
+	g_dlamp.lift = clampf(lift, 0.0, 1.0);
+	g_dlamp.pull = clampf(pull, 0.0, 1.0);
+}
+
+double desk_lamp_lit(void)
+{
+	return g_dlamp.lit;
+}
+
+/* Where it is on the screen for a drawer position: the middle of the foot
+ * on the desk (b), the shade's middle (c) and its two ends (l, r), the
+ * top of the chain (k) and its pull (p), and the point on the desk under
+ * the shade (u), each with the pixels to a room unit there; how much
+ * smaller than made it is. */
+struct dlamp_geo {
+	double s;
+	double bx, by, bp;
+	double cx, cy, cp;
+	double lx, ly, rx, ry;
+	double kx, ky, px, py, pp;
+	double ux, uy, up;
+};
+
+/* How far down the screen the ALL APPS plate can reach, worked out as
+ * desk_allapps_box does without asking the tray (which asks this). */
+static double dlamp_plate_bottom(int w, int h, const struct room_xf *xf)
+{
+	double t = fmax(32.4 * desk_px_per_pt(w), 20.0);
+	double margin = t * 0.40;
+	double mid = h * 0.034;
+	double u, v;
+	vec3 c = pb_cap_to_world(0.0, RM_PB_CAP_T * 0.5,
+		(RM_PB_HZ - 0.10 + RM_PB_SLOT_S + RM_PB_SLOT_HS + 0.30) * 0.5);
+	if (room_project(&xf->rr->cam, c, &u, &v)) {
+		mid = xf->oy + v * xf->rr->h * xf->scale;
+	}
+	return fmax(mid - t * 0.5, margin * 0.5) + t;
+}
+
+static bool dlamp_at(const struct room_xf *xf, double x, double z, double s,
+	struct dlamp_geo *g)
+{
+	double ky = (DLAMP_CHAIN_Y - DLAMP_PULL * g_dlamp.pull) * s;
+	double zs = z + DLAMP_FWD * s;
+	double kz = zs + DLAMP_SHADE_R * 0.85 * s;
+	/* the drop hangs a little out in front of the lip, where a hand
+	 * leaves it, and comes further out as it is pulled */
+	double pz = kz + (0.20 + 0.10 * g_dlamp.pull) * s;
+	double kx = x + DLAMP_CHAIN_X * DLAMP_SHADE * s;
+	double dummy;
+	g->s = s;
+	return bell_point(xf, x, 0.0, z, &g->bx, &g->by, &g->bp)
+		&& bell_point(xf, x, DLAMP_H * s, zs, &g->cx, &g->cy, &g->cp)
+		&& bell_point(xf, x - DLAMP_SHADE * s, DLAMP_H * s, zs, &g->lx, &g->ly, &dummy)
+		&& bell_point(xf, x + DLAMP_SHADE * s, DLAMP_H * s, zs, &g->rx, &g->ry, &dummy)
+		&& bell_point(xf, kx, (DLAMP_H - DLAMP_SHADE_R * 0.40) * s, kz, &g->kx, &g->ky,
+			&dummy)
+		&& bell_point(xf, kx, ky, pz, &g->px, &g->py, &g->pp)
+		&& bell_point(xf, x, 0.0, zs + 0.55 * s, &g->ux, &g->uy, &g->up);
+}
+
+static bool dlamp_geo(int w, int h, double open, struct dlamp_geo *g)
+{
+	struct room_xf xf;
+	if (!room_xform(w, h, open, &xf)) {
+		return false;
+	}
+	/* Laid out with the drawer shut, and moved with the desk after: the
+	 * corner is found on the room as it stands still. */
+	struct room_xf x0f = xf;
+	if (open > 0.0 && !room_xform(w, h, 0.0, &x0f)) {
+		return false;
+	}
+	struct room_render *rr = x0f.rr;
+	double sw = rr->w * x0f.scale, sh = rr->h * x0f.scale;
+	/* between the post box as it is seen -- its cap leans out over the
+	 * desk towards the corner -- and the edge of the screen */
+	double left = w * 0.86;
+	double pqx[2][4], pqy[2][4];
+	if (pb_quads(rr, &rr->cam, x0f.ox, x0f.oy, sw, sh, pqx, pqy)) {
+		left = 0.0;
+		for (int i = 0; i < 2; i++) {
+			for (int k = 0; k < 4; k++) {
+				left = fmax(left, pqx[i][k]);
+			}
+		}
+	}
+	double right = w;
+	double top = dlamp_plate_bottom(w, h, &x0f);
+	/* first guess, then nudged: smaller where the corner is narrow, and
+	 * forward until the shade is clear below the plate */
+	double s = 1.0, x = (RM_PB_CX + RM_PB_HX + RM_HX) * 0.5;
+	double z = RM_ZF + DLAMP_FOOT + 0.12;
+	struct dlamp_geo t;
+	for (int it = 0; it < 3; it++) {
+		if (!dlamp_at(&x0f, x, z, s, &t)) {
+			return false;
+		}
+		double ppu = t.cp;
+		double need = 2.0 * (DLAMP_SHADE + 0.10) * s * ppu;
+		double room = right - left - 0.30 * ppu;
+		if (need > room) {
+			s = clampf(s * room / need, 0.5, 1.0);
+		}
+		/* the shade's middle half way across the gap */
+		x += ((left + right) * 0.5 - t.cx) / fmax(ppu, 1e-6);
+	}
+	for (int it = 0; it < 60; it++) {
+		if (!dlamp_at(&x0f, x, z, s, &t)) {
+			return false;
+		}
+		double shade_top = t.cy - DLAMP_SHADE_R * s * t.cp;
+		double foot_top = t.by - DLAMP_FOOT * s * t.bp;
+		if (fmin(shade_top, foot_top) >= top + 0.10 * t.cp) {
+			break;
+		}
+		z += 0.05;
+	}
+	if (open <= 0.0) {
+		*g = t;
+		return true;
+	}
+	return dlamp_at(&xf, x, z, s, g);
+}
+
+/* The extent of what is touched on the screen (x0, y0, x1, y1): the
+ * shade, the foot and the chain. */
+static void dlamp_body(const struct dlamp_geo *g, double r[4])
+{
+	double sr = DLAMP_SHADE_R * g->s * g->cp, fr = DLAMP_FOOT * g->s * g->bp;
+	r[0] = fmin(fmin(g->lx, g->rx) - sr * 0.4, g->bx - fr);
+	r[2] = fmax(fmax(g->lx, g->rx) + sr * 0.4, g->bx + fr);
+	r[1] = fmin(fmin(g->ly, g->ry) - sr, g->by - fr);
+	r[3] = fmax(fmax(fmax(g->ly, g->ry) + sr, g->by + fr), g->py + 0.06 * g->s * g->pp);
+}
+
+/* The size the chalked word is written at, and how wide it comes out. */
+static double dlamp_label(const struct dlamp_geo *g, double *ww)
+{
+	double fs = fmax(0.34 * g->bp, 9.0);
+	*ww = word_width(agd_measure(), TR("LAMP"), fs);
+	return fs;
+}
+
+static bool dlamp_box(int w, int h, double box[4])
+{
+	struct dlamp_geo g;
+	if (!dlamp_geo(w, h, 0.0, &g)) {
+		box[0] = box[1] = box[2] = box[3] = 0.0;
+		return true;
+	}
+	double r[4];
+	dlamp_body(&g, r);
+	/* and the light it throws round it on the desk, and the word under it */
+	double glow = 2.2 * g.s * g.up;
+	double ww, fs = dlamp_label(&g, &ww);
+	double x0 = fmin(fmin(r[0], g.ux - glow), (r[0] + r[2]) * 0.5 - ww * 0.5 - 4.0);
+	double x1 = fmax(fmax(r[2], g.ux + glow), (r[0] + r[2]) * 0.5 + ww * 0.5 + 4.0);
+	box[0] = floor(fmax(x0, 0.0));
+	box[1] = floor(fmax(fmin(r[1] - 8.0, g.uy - glow), 0.0));
+	box[2] = ceil(fmin(x1, (double)w)) - box[0];
+	box[3] = ceil(fmax(r[3] + fs * 1.9, g.uy + glow)) - box[1];
+	return true;
+}
+
+bool desk_lamp_hit(int w, int h, double px, double py, double open)
+{
+	struct dlamp_geo g;
+	if (!dlamp_geo(w, h, open, &g)) {
+		return false;
+	}
+	double r[4];
+	dlamp_body(&g, r);
+	double m = 0.08 * g.cp;
+	return px >= r[0] - m && px <= r[2] + m && py >= r[1] - m && py <= r[3] + m;
+}
+
+/* Brass, round, lit from (lx, ly): a disc at (x, y), radius rad. */
+static void dlamp_brass_disc(cairo_t *cr, double x, double y, double rad, double lx,
+	double ly, double hot)
+{
+	cairo_pattern_t *bg = cairo_pattern_create_radial(x + lx * rad * 0.45,
+		y + ly * rad * 0.45, 0.0, x, y, rad);
+	cairo_pattern_add_color_stop_rgb(bg, 0.00, fmin(1.0, 1.000 * hot), fmin(1.0, 0.941 * hot),
+		0.749 * hot);   /* #fff0bf */
+	cairo_pattern_add_color_stop_rgb(bg, 0.30, 0.902 * hot, 0.757 * hot, 0.400 * hot);   /* #e6c166 */
+	cairo_pattern_add_color_stop_rgb(bg, 0.70, 0.655 * hot, 0.482 * hot, 0.165 * hot);   /* #a77b2a */
+	cairo_pattern_add_color_stop_rgb(bg, 1.00, 0.431 * hot, 0.310 * hot, 0.094 * hot);   /* #6e4f18 */
+	cairo_set_source(cr, bg);
+	cairo_arc(cr, x, y, rad, 0, 2 * M_PI);
+	cairo_fill(cr);
+	cairo_pattern_destroy(bg);
+	cairo_set_line_width(cr, fmax(rad * 0.06, 0.8));
+	cairo_set_source_rgba(cr, 0.30, 0.20, 0.05, 0.70);
+	cairo_arc(cr, x, y, rad, 0, 2 * M_PI);
+	cairo_stroke(cr);
+}
+
+static void dlamp_paint(cairo_t *cr, int w, int h, double open)
+{
+	struct dlamp_geo g;
+	if (!dlamp_geo(w, h, open, &g)) {
+		return;
+	}
+	double s = g.s, lift = g_dlamp.lift, lit = g_dlamp.lit;
+	double hot = 1.0 + 0.10 * lift;
+	cairo_save(cr);
+	desk_set_paint_origin(0, 0);
+	double lx, ly, lz;
+	lamp_toward(g.cx, g.cy, &lx, &ly, &lz);
+	double ln = fmax(hypot(lx, ly), 1e-6);
+	lx /= ln;
+	ly /= ln;
+
+	/* the light it throws on the desk: a warm pool under the shade,
+	 * longer than deep, as a shade lying across it lets it out */
+	if (lit > 0.01) {
+		double pr = 2.1 * s * g.up;
+		cairo_save(cr);
+		cairo_translate(cr, g.ux, g.uy);
+		cairo_scale(cr, 1.0, 0.58);
+		cairo_pattern_t *pg = cairo_pattern_create_radial(0, 0, 0.0, 0, 0, pr);
+		cairo_pattern_add_color_stop_rgba(pg, 0.00, 1.0, 0.82, 0.50, 0.36 * lit);
+		cairo_pattern_add_color_stop_rgba(pg, 0.45, 1.0, 0.74, 0.38, 0.15 * lit);
+		cairo_pattern_add_color_stop_rgba(pg, 1.00, 1.0, 0.70, 0.32, 0.0);
+		cairo_set_source(cr, pg);
+		cairo_arc(cr, 0, 0, pr, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pattern_destroy(pg);
+		cairo_restore(cr);
+	}
+
+	/* its shadow, from the room's lamp: the shade's, long and soft, and
+	 * the foot's, close */
+	double fr = DLAMP_FOOT * s * g.bp;
+	double sr = DLAMP_SHADE_R * s * g.cp;
+	double sl = hypot(g.rx - g.lx, g.ry - g.ly) * 0.5;
+	if (gfx_shadows()) {
+		double ox, oy;
+		shadow_dir(g.ux, g.uy, DLAMP_H * s * g.up * 0.55, &ox, &oy);
+		for (int i = 6; i >= 1; i--) {
+			double t = i / 6.0, grow = sr * 0.5 * t;
+			cairo_set_source_rgba(cr, 0.06, 0.04, 0.03, (0.08 * (1.0 - t) + 0.02) * (1.0 - 0.5 * lit));
+			desk_rounded_path(cr, g.ux + ox - sl - grow, g.uy + oy - sr - grow,
+				2.0 * (sl + grow), 2.0 * (sr + grow), sr + grow);
+			cairo_fill(cr);
+		}
+		contact_shadow(cr, g.bx - fr, g.by - fr, fr * 2.0, fr * 2.0, 0.40);
+	}
+
+	/* the foot: a brass dish, stepped */
+	dlamp_brass_disc(cr, g.bx, g.by, fr, lx, ly, hot);
+	cairo_set_line_width(cr, fmax(fr * 0.05, 0.7));
+	cairo_set_source_rgba(cr, 0.25, 0.16, 0.04, 0.55);
+	cairo_arc(cr, g.bx, g.by, fr * 0.62, 0, 2 * M_PI);
+	cairo_stroke(cr);
+	cairo_set_source_rgba(cr, 1.0, 0.94, 0.78, 0.30);
+	cairo_arc(cr, g.bx - lx * 0.8, g.by - ly * 0.8, fr * 0.62, 0, 2 * M_PI);
+	cairo_stroke(cr);
+
+	/* the stem, from the foot up to the shade */
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_width(cr, fmax(0.11 * s * g.bp, 1.6));
+	cairo_set_source_rgb(cr, 0.431 * hot, 0.310 * hot, 0.094 * hot);
+	cairo_move_to(cr, g.bx, g.by);
+	cairo_line_to(cr, g.cx, g.cy);
+	cairo_stroke(cr);
+	cairo_set_line_width(cr, fmax(0.04 * s * g.bp, 0.8));
+	cairo_set_source_rgba(cr, 1.0, 0.92, 0.70, 0.55);
+	cairo_move_to(cr, g.bx - 0.6, g.by);
+	cairo_line_to(cr, g.cx - 0.6, g.cy);
+	cairo_stroke(cr);
+
+	/* the shade, seen from over it: green cased glass, round on top --
+	 * dark bottle green with the light only on its ridge when it is off,
+	 * and when it is on the glass alight from inside, the bulb's light
+	 * spilling out warm under its front lip */
+	double ang = atan2(g.ry - g.ly, g.rx - g.lx);
+	cairo_save(cr);
+	cairo_translate(cr, g.cx, g.cy);
+	cairo_rotate(cr, ang);
+	double L = sl, R = sr;
+	if (lit > 0.01) {
+		/* the spill under the lip, on the desk in front of it */
+		cairo_save(cr);
+		cairo_translate(cr, 0, R * 0.95);
+		cairo_scale(cr, L * 1.05, R * 1.25);
+		cairo_pattern_t *sp = cairo_pattern_create_radial(0, 0, 0.0, 0, 0, 1.0);
+		cairo_pattern_add_color_stop_rgba(sp, 0.0, 1.0, 0.90, 0.62, 0.62 * lit);
+		cairo_pattern_add_color_stop_rgba(sp, 0.45, 1.0, 0.84, 0.52, 0.30 * lit);
+		cairo_pattern_add_color_stop_rgba(sp, 1.0, 1.0, 0.80, 0.45, 0.0);
+		cairo_set_source(cr, sp);
+		cairo_arc(cr, 0, 0, 1.0, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pattern_destroy(sp);
+		cairo_restore(cr);
+	}
+	desk_rounded_path(cr, -L, -R, 2.0 * L, 2.0 * R, R * 0.45);
+	cairo_save(cr);
+	cairo_clip_preserve(cr);
+	/* across it, back to front: the cylinder, its ridge a little behind
+	 * the middle where the room's light is */
+	double k = 1.0 + 0.08 * lift;
+	cairo_pattern_t *gg = cairo_pattern_create_linear(0, -R, 0, R);
+	double off[5][3] = {
+		{ 0.020, 0.090, 0.050 }, { 0.090, 0.260, 0.150 }, { 0.250, 0.480, 0.330 },
+		{ 0.070, 0.210, 0.120 }, { 0.015, 0.070, 0.040 },
+	};
+	double on[5][3] = {
+		{ 0.050, 0.230, 0.110 }, { 0.150, 0.470, 0.240 }, { 0.520, 0.820, 0.500 },
+		{ 0.180, 0.500, 0.250 }, { 0.070, 0.280, 0.130 },
+	};
+	static const double at[5] = { 0.0, 0.26, 0.42, 0.70, 1.0 };
+	for (int i = 0; i < 5; i++) {
+		cairo_pattern_add_color_stop_rgb(gg, at[i],
+			fmin(1.0, (off[i][0] + (on[i][0] - off[i][0]) * lit) * k),
+			fmin(1.0, (off[i][1] + (on[i][1] - off[i][1]) * lit) * k),
+			fmin(1.0, (off[i][2] + (on[i][2] - off[i][2]) * lit) * k));
+	}
+	cairo_set_source(cr, gg);
+	cairo_fill(cr);
+	cairo_pattern_destroy(gg);
+	/* the glow through the glass, strongest over the bulb */
+	if (lit > 0.01) {
+		cairo_save(cr);
+		cairo_scale(cr, 1.0, R / L);
+		cairo_pattern_t *bl = cairo_pattern_create_radial(0, 0, 0.0, 0, 0, L);
+		cairo_pattern_add_color_stop_rgba(bl, 0.0, 0.85, 1.0, 0.62, 0.42 * lit);
+		cairo_pattern_add_color_stop_rgba(bl, 0.6, 0.50, 0.85, 0.40, 0.14 * lit);
+		cairo_pattern_add_color_stop_rgba(bl, 1.0, 0.40, 0.80, 0.35, 0.0);
+		cairo_set_source(cr, bl);
+		cairo_paint(cr);
+		cairo_pattern_destroy(bl);
+		cairo_restore(cr);
+	}
+	/* the room's lamp in the glass: a hard streak along the ridge */
+	cairo_set_line_width(cr, fmax(R * 0.10, 0.8));
+	cairo_set_source_rgba(cr, 1.0, 1.0, 0.94, 0.55 + 0.20 * lift);
+	cairo_move_to(cr, -L * 0.70, -R * 0.22);
+	cairo_line_to(cr, L * 0.55, -R * 0.22);
+	cairo_stroke(cr);
+	overlay_grain(cr, -L, -R, 2.0 * L, 2.0 * R, 0.5);
+	cairo_restore(cr);
+	cairo_set_line_width(cr, fmax(R * 0.07, 0.8));
+	cairo_set_source_rgba(cr, 0.02, 0.07, 0.03, 0.80);
+	cairo_stroke(cr);
+	/* its lip, bound in brass at each end */
+	for (int e = -1; e <= 1; e += 2) {
+		double ex = e * (L - R * 0.30);
+		cairo_save(cr);
+		desk_rounded_path(cr, -L, -R, 2.0 * L, 2.0 * R, R * 0.45);
+		cairo_clip(cr);
+		cairo_pattern_t *cg = cairo_pattern_create_linear(0, -R, 0, R);
+		cairo_pattern_add_color_stop_rgb(cg, 0.0, 0.431 * hot, 0.310 * hot, 0.094 * hot);
+		cairo_pattern_add_color_stop_rgb(cg, 0.4, fmin(1.0, 0.98 * hot), 0.86 * hot, 0.52 * hot);
+		cairo_pattern_add_color_stop_rgb(cg, 1.0, 0.40 * hot, 0.28 * hot, 0.08 * hot);
+		cairo_set_source(cr, cg);
+		cairo_rectangle(cr, ex - R * 0.32, -R, R * 0.64, 2.0 * R);
+		cairo_fill(cr);
+		cairo_pattern_destroy(cg);
+		cairo_restore(cr);
+	}
+	/* and the brass knob it is held by, on its ridge */
+	cairo_restore(cr);
+	dlamp_brass_disc(cr, g.cx, g.cy, fmax(0.10 * s * g.cp, 2.0), lx, ly, hot);
+
+	/* the pull chain: beads down from under the front lip, and the brass
+	 * drop on the end of it, which is what is pulled */
+	double cdx = g.px - g.kx, cdy = g.py - g.ky;
+	double clen = hypot(cdx, cdy);
+	double br = fmax(0.030 * s * g.pp, 1.0);
+	int nb = (int)fmin(fmax(clen / (br * 2.4), 2.0), 40.0);
+	for (int i = 0; i <= nb; i++) {
+		double u = (double)i / nb;
+		double bx = g.kx + cdx * u, by = g.ky + cdy * u;
+		cairo_set_source_rgba(cr, 0.38, 0.27, 0.08, 0.95);
+		cairo_arc(cr, bx, by, br, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_set_source_rgba(cr, 1.0, 0.92, 0.66, 0.70);
+		cairo_arc(cr, bx + lx * br * 0.35, by + ly * br * 0.35, br * 0.45, 0, 2 * M_PI);
+		cairo_fill(cr);
+	}
+	double dr = fmax(0.085 * s * g.pp, 2.6);
+	if (gfx_shadows()) {
+		double ox, oy;
+		shadow_dir(g.px, g.py, DLAMP_CHAIN_Y * s * g.pp * 0.6, &ox, &oy);
+		cairo_set_source_rgba(cr, 0.06, 0.04, 0.03, 0.30);
+		cairo_arc(cr, g.px + ox, g.py + oy, dr * 1.2, 0, 2 * M_PI);
+		cairo_fill(cr);
+	}
+	dlamp_brass_disc(cr, g.px, g.py, dr, lx, ly, hot * (1.0 + 0.06 * lift));
+
+	/* with the hand on it, the word for it chalked on the desk under it */
+	if (lift > 0.01) {
+		double ww, fs = dlamp_label(&g, &ww);
+		double r[4];
+		dlamp_body(&g, r);
+		print_word(cr, TR("LAMP"), (r[0] + r[2]) * 0.5 - ww * 0.5, r[3] + fs * 1.25, fs,
+			0.93, 0.91, 0.84, 0.62 * lift);
+	}
+	cairo_restore(cr);
+}
+
+/* How far down the screen it reaches, for the tray's extent. */
+static bool dlamp_tray_bottom(int w, int h, double *bottom)
+{
+	struct dlamp_geo g;
+	if (!dlamp_geo(w, h, 0.0, &g)) {
+		return false;
+	}
+	double r[4];
+	dlamp_body(&g, r);
+	*bottom = r[3];
+	return true;
+}
+
+/* ---- the room with the reading lamp off ----------------------------
+ *
+ * The light the room was traced in comes from the lamp; with it off what
+ * is left is what comes in from outside and from the house. Not black: a
+ * desk you cannot see is not a dark mode, it is a broken screen. The pool
+ * of light the lamp threw goes back down further than the corners did, so
+ * the desk is evenly dim, and the fill is a little cool -- the night
+ * outside rather than another lamp. */
+struct lamp_night {
+	double cx, cy, r, a0, a1;
+};
+
+static void lamp_night_of(int w, int h, double dark, struct lamp_night *n)
+{
+	double d = clampf(dark, 0.0, 1.0);
+	/* where the pool was: between the middle of the desk and the point
+	 * under the room's lamp */
+	n->cx = w * 0.5 + (clampf(g_desk_lamp.x, 0.0, w) - w * 0.5) * 0.45;
+	n->cy = h * 0.5 + (clampf(g_desk_lamp.y, 0.0, h) - h * 0.5) * 0.45;
+	n->r = hypot(w, h) * 0.70;
+	n->a0 = 0.62 * d;
+	n->a1 = 0.48 * d;
+}
+
+void desk_draw_lamp_night(cairo_t *cr, int w, int h, double dark)
+{
+	struct lamp_night n;
+	lamp_night_of(w, h, dark, &n);
+	if (n.a0 < 0.002) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_pattern_t *g = cairo_pattern_create_radial(n.cx, n.cy, 0.0, n.cx, n.cy, n.r);
+	cairo_pattern_add_color_stop_rgba(g, 0.0, 0.010, 0.020, 0.052, n.a0);
+	cairo_pattern_add_color_stop_rgba(g, 0.6, 0.010, 0.020, 0.052, n.a0 * 0.40 + n.a1 * 0.60);
+	cairo_pattern_add_color_stop_rgba(g, 1.0, 0.010, 0.020, 0.052, n.a1);
+	cairo_pattern_set_extend(g, CAIRO_EXTEND_PAD);
+	cairo_set_source(cr, g);
+	cairo_paint(cr);
+	cairo_pattern_destroy(g);
+	cairo_restore(cr);
+}
+
+double desk_lamp_night_alpha_at(int w, int h, double dark, double x, double y)
+{
+	struct lamp_night n;
+	lamp_night_of(w, h, dark, &n);
+	double t = clampf(hypot(x - n.cx, y - n.cy) / fmax(n.r, 1.0), 0.0, 1.0);
+	double mid = n.a0 * 0.40 + n.a1 * 0.60;
+	return t < 0.6 ? n.a0 + (mid - n.a0) * t / 0.6 : mid + (n.a1 - mid) * (t - 0.6) / 0.4;
+}
+
 /* ---- the tray ---------------------------------------------------
  *
  * What stands along the back edge of the desk -- the console's ledge, the
@@ -30617,6 +31125,10 @@ static bool tray_measure(int w, int h, struct tray_extent *te)
 	/* and the bell, where there is one */
 	double bb;
 	if (bell_tray_bottom(w, h, &bb)) {
+		bottom = fmax(bottom, bb);
+	}
+	/* and the reading lamp in the corner */
+	if (dlamp_tray_bottom(w, h, &bb)) {
 		bottom = fmax(bottom, bb);
 	}
 	if (bottom <= 0.0) {
@@ -31072,6 +31584,7 @@ void desk_draw_gadgets(cairo_t *cr, int w, int h, time_t now, double drawer_open
 
 	allapps_plate(cr, w, h, false);
 	bell_paint(cr, w, h, drawer_open);
+	dlamp_paint(cr, w, h, drawer_open);
 
 	/* With the drawer out, the desk is not what you are looking at. It goes
 	 * down the way a home screen does behind the multitasking tray -- which
@@ -31121,6 +31634,12 @@ uint64_t desk_overlay_key(int which, time_t now, int unread)
 			| (uint64_t)lround(g_bell.press * 32.0) << 8;
 		return k | 1u;
 	}
+	case DESK_OVL_LAMP:
+		/* how far on, the hand on it and the chain, in steps too small to
+		 * see */
+		return 1u | (uint64_t)lround(g_dlamp.lit * 64.0) << 1
+			| (uint64_t)lround(g_dlamp.lift * 32.0) << 8
+			| (uint64_t)lround(g_dlamp.pull * 32.0) << 16;
 	default:
 		return 1u;   /* the plates: they never change */
 	}
@@ -31163,6 +31682,9 @@ void desk_draw_overlay(cairo_t *cr, int which, int w, int h, time_t now, int unr
 	case DESK_OVL_BELL:
 		bell_paint(cr, w, h, 0.0);
 		break;
+	case DESK_OVL_LAMP:
+		dlamp_paint(cr, w, h, 0.0);
+		break;
 	default:
 		break;
 	}
@@ -31202,6 +31724,20 @@ void desk_draw_desktop(cairo_t *cr, int w, int h, time_t now, bool with_demo_win
 	desk_draw_gadgets(cr, w, h, now, drawer_open);
 	desk_draw_console_idle(cr, w, h, drawer_open);
 	desk_draw_post_idle(cr, w, h, drawer_open, 2);
+	/* the reading lamp off: the room down, and the clock's display
+	 * shining through it, as the compositor lays them */
+	if (g_dlamp.lit < 0.999) {
+		double dark = 1.0 - g_dlamp.lit;
+		desk_draw_lamp_night(cr, w, h, dark);
+		double box[4];
+		if (drawer_open <= 0.004 && desk_clock_glow_box(w, h, box)) {
+			cairo_push_group(cr);
+			desk_draw_clock_glow(cr, w, h);
+			cairo_pop_group_to_source(cr);
+			cairo_paint_with_alpha(cr, clampf(desk_lamp_night_alpha_at(w, h, dark,
+				box[0] + box[2] * 0.5, box[1] + box[3] * 0.5), 0.0, 1.0));
+		}
+	}
 
 	if (!with_demo_window) {
 		return;

@@ -227,6 +227,7 @@ struct shell_conf {
 	bool have_loc;              /* location = lat,lon */
 	double loc_lat, loc_lon;
 	char bell[128];             /* the program the bell on the desk brings; "" no bell */
+	bool lamp;                  /* the reading lamp on the desk on (the room lit) */
 	bool celebrations;          /* days kept: the door dressed, the clock's shows */
 	bool weather;               /* the door out in the real weather (asked for) */
 	int screen_off;             /* minutes untouched before the screen goes dark; 0 never */
@@ -732,6 +733,18 @@ struct desk_server {
 		double lift, anim_at;
 		double struck_at, started_at;
 	} bell;
+	/* the reading lamp on the desk (shell.conf's lamp): the hand on it,
+	 * how far it is on (lit, going after conf.lamp), when its chain was
+	 * last pulled; the dark it leaves over the desk and over the drawer,
+	 * and the clock shining through */
+	struct {
+		bool ready, hot, animating;
+		double lift, lit, anim_at, pulled_at;
+		struct wlr_scene_buffer *night;
+		int night_w, night_h;
+		struct wlr_scene_rect *drawer_night;
+		struct desk_sprite glow;
+	} lamp;
 	struct wlr_scene_tree *drag_icon;
 	struct wl_list keyboards;
 	struct wl_list pointers;            /* struct desk_pointer */
@@ -1252,6 +1265,7 @@ struct desk_server {
 	/* how far the lamp is up for the bare desk beside the desk's screen:
 	 * as it is for the desk at login and in a show (night_paint) */
 	double side_light;
+	double side_shown;   /* and with the reading lamp on the desk as it is */
 	/* Ending the session (end_begin): every window asked to close first,
 	 * and the logging out, restart or power off done once they all have.
 	 * ending is 0, or 1 + enum desk_end. */
@@ -2510,6 +2524,7 @@ static void folds_tick(struct desk_server *server)
 static void room_layout(struct desk_server *server);
 static void desktop_tick(struct desk_server *server);
 static void overlay_place(struct desk_server *server);
+static void lamp_night_place(struct desk_server *server);
 static void desk_resize_to(struct desk_server *server, int w, int h);
 
 /* Draw one sprite again. draw paints in screen coordinates, exactly as it
@@ -9983,7 +9998,12 @@ static void terminal_open(void)
  *                                         the clock and the post box, that
  *                                         brings that program: its window
  *                                         to the front, or the program
- *                                         started (none, no bell) */
+ *                                         started (none, no bell)
+ *   lamp = on | off                       the reading lamp in the corner
+ *                                         past the post box, and the light
+ *                                         the desk is lit by: off, the room
+ *                                         dim and cool (its chain writes
+ *                                         this) */
 
 static void shell_conf_path(char *out, size_t n)
 {
@@ -10065,6 +10085,7 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->bday_month = c->bday_day = 0;
 	c->have_loc = false;
 	c->bell[0] = '\0';
+	c->lamp = true;
 	c->celebrations = true;
 	c->weather = true;
 	c->screen_off = 10;
@@ -10396,6 +10417,9 @@ static void shell_conf_read_file(struct shell_conf *c, const char *path)
 			c->letter_sound = b;
 		} else if (!strcmp(key, "lights_at_login")) {
 			c->lights_at_login = b;
+		} else if (!strcmp(key, "lamp")) {
+			/* on, or off: the reading lamp on the desk, as its chain left it */
+			c->lamp = b;
 		} else if (!strcmp(key, "celebrations")) {
 			/* not on Shell Settings: the days are kept as a surprise, on
 			 * their dates. This is for anyone who needs them not to be
@@ -10572,6 +10596,7 @@ static int gfx_wanted(const struct desk_server *server)
 }
 
 static void bell_publish(struct desk_server *server);
+static void lamp_publish(struct desk_server *server);
 
 /* Once a second: read again if it has changed since it was last read. */
 static void shell_conf_poll(struct desk_server *server)
@@ -10629,6 +10654,7 @@ static void shell_conf_poll(struct desk_server *server)
 		c->have_loc, c->loc_lat, c->loc_lon };
 	desk_occasion_conf(&oc);
 	bell_publish(server);
+	lamp_publish(server);
 	if (!first && locked(server)) {
 		paint_lock(server);
 		server_schedule_frames(server);
@@ -11255,6 +11281,8 @@ static void drawer_compose(struct desk_server *server)
 	wlr_scene_node_raise_to_top(&server->drw_node->node);
 	prof_end();
 	room_layout(server);
+	/* what is in the drawer under the dark too, when the lamp is off */
+	lamp_night_place(server);
 }
 
 static void drawer_hover_to(struct desk_server *server, int hover)
@@ -12301,6 +12329,20 @@ static bool paper_moved(const struct desk_server *server)
 	return server->desk_dx != 0 || server->desk_dy != 0 || server->win_dy != 0;
 }
 
+/* How much of the reading lamp's light reaches the bare desk beside the
+ * desk's screen: all of it on, a little under half of it off. */
+static double side_lamp(const struct desk_server *server)
+{
+	double lit = server->lamp.ready ? clampf_d(server->lamp.lit, 0.0, 1.0) : 1.0;
+	return 1.0 - 0.55 * (1.0 - lit);
+}
+
+/* and how far up that leaves it, with the lamp coming up at login */
+static double side_opacity(const struct desk_server *server)
+{
+	return clampf_d(server->side_light, 0.0, 1.0) * side_lamp(server);
+}
+
 /* The bare desk on each screen beside the desk's own (layer_side), cut
  * from the desk's room (desk_draw_side_desk): drawn for where that screen
  * is, how big, the level and the room -- again only when one of those has
@@ -12345,7 +12387,7 @@ static void side_desks_paint(struct desk_server *server, bool force)
 		scene_put(&o->side, server->layer_side, buf, box.x, box.y, NULL);
 		if (o->side) {
 			wlr_scene_buffer_set_dest_size(o->side, box.width, box.height);
-			wlr_scene_buffer_set_opacity(o->side, (float)server->side_light);
+			wlr_scene_buffer_set_opacity(o->side, (float)side_opacity(server));
 		}
 		o->side_box = box;
 		o->side_room = room;
@@ -12362,14 +12404,16 @@ static void side_desks_paint(struct desk_server *server, bool force)
 static void side_desks_light(struct desk_server *server, double L)
 {
 	L = clampf_d(L, 0.0, 1.0);
-	if (fabs(L - server->side_light) < 1e-4) {
+	double shown = L * side_lamp(server);
+	if (fabs(L - server->side_light) < 1e-4 && fabs(shown - server->side_shown) < 1e-4) {
 		return;
 	}
 	server->side_light = L;
+	server->side_shown = shown;
 	struct desk_output *o;
 	wl_list_for_each(o, &server->outputs, link) {
 		if (o->side) {
-			wlr_scene_buffer_set_opacity(o->side, (float)L);
+			wlr_scene_buffer_set_opacity(o->side, (float)shown);
 		}
 	}
 }
@@ -13959,6 +14003,8 @@ static void overlay_place(struct desk_server *server)
 		wlr_scene_node_set_position(&server->shade_edge->node, 0, full);
 	}
 	wlr_scene_node_set_enabled(&server->shade_edge->node, on && part > 0.002);
+	/* and the dark of the reading lamp being off, over all of it */
+	lamp_night_place(server);
 }
 
 struct ovl_args {
@@ -19814,12 +19860,236 @@ static void bell_tick_frame(struct desk_server *server)
 	}
 }
 
+/* ---- the reading lamp on the desk -----------------------------------
+ *
+ * A banker's lamp in the corner past the post box (draw.c draws it, as the
+ * DESK_OVL_LAMP overlay), and its chain is the switch for the light the
+ * desk is lit by: shell.conf's lamp = on | off, written when the chain is
+ * pulled. Off, the room goes down under a dark of its own (lamp.night: in
+ * the desk's layer, over the room and everything drawn on it and under
+ * every window; lamp.drawer_night over the drawer's front and what is in
+ * it), the clock's display shining through it (lamp.glow) and the bare
+ * desk beside the desk's screen going down with it. Nothing is traced
+ * again: on the GPU and on the processor the room under it is the same. */
+
+/* How far down the room is (0 lit .. 1 the lamp off), for the dark. */
+static double lamp_dark(const struct desk_server *server)
+{
+	return 1.0 - clampf_d(server->lamp.lit, 0.0, 1.0);
+}
+
+struct lamp_glow_args {
+	int w, h;
+};
+
+static void lamp_glow_draw(cairo_t *cr, int w, int h, void *data)
+{
+	(void)data;
+	desk_draw_clock_glow(cr, w, h);
+}
+
+/* The dark the lamp being off leaves, as far off as it is: laid where it
+ * goes, and drawn again only for a new size of screen. */
+static void lamp_night_place(struct desk_server *server)
+{
+	int w = server->desk_w, h = server->desk_h;
+	double dark = lamp_dark(server);
+	bool on = dark > 0.004 && w >= 8 && h >= 8 && server->layer_desk;
+	if (on && (!server->lamp.night || server->lamp.night_w != w || server->lamp.night_h != h)) {
+		/* all gradient: a quarter of the screen, stretched, at all the way
+		 * off; how far off it is now is the node's opacity */
+		int nw = w / 4 > 16 ? w / 4 : 16, nh = h / 4 > 16 ? h / 4 : 16;
+		struct desk_buf *buf = buf_create(nw, nh);
+		cairo_save(buf->cr);
+		cairo_scale(buf->cr, (double)nw / w, (double)nh / h);
+		desk_draw_lamp_night(buf->cr, w, h, 1.0);
+		cairo_restore(buf->cr);
+		scene_put(&server->lamp.night, server->layer_desk, buf, 0, 0, NULL);
+		if (server->lamp.night) {
+			/* it is the dark in the room, not something you can click */
+			server->lamp.night->point_accepts_input = shadow_accepts;
+		}
+		server->lamp.night_w = w;
+		server->lamp.night_h = h;
+	}
+	if (server->lamp.night) {
+		if (on) {
+			wlr_scene_buffer_set_dest_size(server->lamp.night, w, h);
+			wlr_scene_buffer_set_opacity(server->lamp.night, (float)dark);
+			/* over everything on the desk -- the sprites are in the trees
+			 * under it -- and under the windows, which are a layer up */
+			wlr_scene_node_raise_to_top(&server->lamp.night->node);
+		}
+		wlr_scene_node_set_enabled(&server->lamp.night->node, on);
+	}
+	/* the drawer's front, and the drawer when it is out: the same dark, as
+	 * flat as the shade the open drawer throws, from where the drawer
+	 * starts down -- it is a layer over the windows, so no higher */
+	int ox, oy;
+	double clip;
+	bool dr = on && server->layer_drawer && desk_desk_place(w, h, server->drawer_t, &ox, &oy,
+		&clip) && clip < h;
+	if (dr && !server->lamp.drawer_night) {
+		const float none[4] = { 0, 0, 0, 0 };
+		server->lamp.drawer_night = wlr_scene_rect_create(server->layer_drawer, 0, 0, none);
+	}
+	if (server->lamp.drawer_night) {
+		if (dr) {
+			int top = clip > 0.0 ? (int)floor(clip) : 0;
+			float a = (float)desk_lamp_night_alpha_at(w, h, dark, w * 0.5, h);
+			const float color[4] = { 0.010f * a, 0.020f * a, 0.052f * a, a };
+			wlr_scene_rect_set_color(server->lamp.drawer_night, color);
+			wlr_scene_rect_set_size(server->lamp.drawer_night, w, h - top + 2);
+			wlr_scene_node_set_position(&server->lamp.drawer_night->node, 0, top);
+			wlr_scene_node_raise_to_top(&server->lamp.drawer_night->node);
+		}
+		wlr_scene_node_set_enabled(&server->lamp.drawer_night->node, dr);
+	}
+	/* the clock's display, which lights itself, through the dark -- while
+	 * the drawer is shut and the clock where it was drawn */
+	struct desk_sprite *sp = &server->lamp.glow;
+	double box[4];
+	bool glow = on && server->drawer_t <= 0.004 && !server->drawer_moving
+		&& desk_clock_glow_box(w, h, box);
+	if (glow) {
+		uint64_t key = desk_clock_key(time(NULL)) ^ ((uint64_t)w << 16) ^ (uint64_t)h;
+		if (!sp->drawn || sp->key != key) {
+			sp->key = key;
+			struct lamp_glow_args a = { w, h };
+			sprite_paint(server, sp, server->layer_desk, box, lamp_glow_draw, &a);
+		}
+		if (sp->node) {
+			double a = desk_lamp_night_alpha_at(w, h, dark, box[0] + box[2] * 0.5,
+				box[1] + box[3] * 0.5);
+			wlr_scene_buffer_set_opacity(sp->node, (float)clampf_d(a, 0.0, 1.0));
+			wlr_scene_node_set_enabled(&sp->node->node, true);
+			wlr_scene_node_raise_to_top(&sp->node->node);
+		}
+	} else if (sp->node) {
+		wlr_scene_node_set_enabled(&sp->node->node, false);
+	}
+	/* and the bare desk beside the desk's screen goes down with it */
+	side_desks_light(server, server->side_light);
+}
+
+/* What it shows, handed to the painter and painted if that comes out
+ * different; and the room as dark as it is. */
+static void lamp_publish(struct desk_server *server)
+{
+	if (!server->lamp.ready) {
+		/* as shell.conf leaves it, from the first frame: not switched on
+		 * at every login */
+		server->lamp.lit = server->conf.lamp ? 1.0 : 0.0;
+		server->lamp.ready = true;
+	}
+	double want = server->conf.lamp ? 1.0 : 0.0;
+	if (want != server->lamp.lit && !server->lamp.animating) {
+		/* shell.conf changed by hand: the lamp follows it */
+		server->lamp.anim_at = monotonic_sec();
+		server->lamp.animating = true;
+		server_schedule_frames(server);
+	}
+	double pull = 0.0;
+	double since = monotonic_sec() - server->lamp.pulled_at;
+	if (since >= 0.0 && since < 0.30) {
+		/* down, and back up on the chain's own weight */
+		pull = since < 0.07 ? since / 0.07 : 1.0 - (since - 0.07) / 0.23;
+	}
+	desk_lamp_set(server->lamp.lit, server->lamp.lift, pull);
+	struct desk_sprite *sp = &server->ovl[DESK_OVL_LAMP];
+	if (server->ovl_placed) {
+		uint64_t key = desk_overlay_key(DESK_OVL_LAMP, 0, 0);
+		if (!sp->drawn || sp->key != key) {
+			sp->key = key;
+			sprite_draw(server, DESK_OVL_LAMP, time(NULL), post_unread());
+			overlay_place(server);
+			server_schedule_frames(server);
+		}
+	}
+	lamp_night_place(server);
+}
+
+/* The hand over it (can_touch: nothing lies over the desk there). */
+static bool lamp_track(struct desk_server *server, bool can_touch)
+{
+	bool hot = can_touch && desk_lamp_hit(server->desk_w, server->desk_h, server->cursor->x,
+		server->cursor->y, server->drawer_t);
+	if (hot != server->lamp.hot) {
+		server->lamp.hot = hot;
+		server->lamp.anim_at = monotonic_sec();
+		server->lamp.animating = true;
+		server_schedule_frames(server);
+	}
+	return hot;
+}
+
+/* Its chain pulled: the light the other way, and shell.conf told. */
+static void lamp_pull(struct desk_server *server)
+{
+	struct shell_conf *c = &server->conf;
+	c->lamp = !c->lamp;
+	server->lamp.pulled_at = monotonic_sec();
+	server->lamp.anim_at = server->lamp.pulled_at;
+	server->lamp.animating = true;
+	snd_at(server, DESK_SND_TOGGLE, server->cursor->x, 0.8);
+	if (shell_conf_put("lamp", c->lamp ? "on" : "off")) {
+		wlr_log(WLR_INFO, "the lamp: %s (shell.conf: lamp = %s)", c->lamp ? "on" : "off",
+			c->lamp ? "on" : "off");
+	}
+	server_schedule_frames(server);
+}
+
+static void lamp_press(struct desk_server *server, uint32_t button, bool *taken)
+{
+	*taken = false;
+	if (button != BTN_LEFT || !desk_lamp_hit(server->desk_w, server->desk_h,
+			server->cursor->x, server->cursor->y, server->drawer_t)) {
+		return;
+	}
+	*taken = true;
+	lamp_pull(server);
+}
+
+/* Once a frame while it moves: the brass coming up under the hand, the
+ * chain, and the filament coming up or going down. */
+static void lamp_tick_frame(struct desk_server *server)
+{
+	if (!server->lamp.animating) {
+		return;
+	}
+	double now = monotonic_sec();
+	double dt = clampf_d(now - server->lamp.anim_at, 0.0, 0.05);
+	server->lamp.anim_at = now;
+	double to = server->lamp.hot ? 1.0 : 0.0;
+	double k = gfx_flat() ? 1.0 : 1.0 - exp(-dt / (to > server->lamp.lift ? 0.06 : 0.12));
+	server->lamp.lift += (to - server->lamp.lift) * k;
+	if (fabs(to - server->lamp.lift) < 0.01) {
+		server->lamp.lift = to;
+	}
+	/* a filament: up quickly, down a little slower, as it cools */
+	double want = server->conf.lamp ? 1.0 : 0.0;
+	double kl = gfx_flat() ? 1.0 : 1.0 - exp(-dt / (want > server->lamp.lit ? 0.07 : 0.10));
+	server->lamp.lit += (want - server->lamp.lit) * kl;
+	if (fabs(want - server->lamp.lit) < 0.005) {
+		server->lamp.lit = want;
+	}
+	bool more = server->lamp.lift != to || server->lamp.lit != want
+		|| now - server->lamp.pulled_at < 0.32;
+	server->lamp.animating = true;   /* (so lamp_publish does not start it again) */
+	lamp_publish(server);
+	server->lamp.animating = more;
+	if (more) {
+		server_schedule_frames(server);
+	}
+}
+
 static void desk_hover_off(struct desk_server *server)
 {
 	drawer_hover_to(server, -1);
 	clock_track(server, false);
 	slips_track(server, false);
 	bell_track(server, false);
+	lamp_track(server, false);
 	if (shelf_up(server) && server->shelf_binder < 0) {
 		hover_set(server, -1);
 	}
@@ -19998,7 +20268,9 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 	bool on_clock = clock_track(server, !window_under(server));
 	bool on_slip = slips_track(server, !window_under(server));
 	bool on_bell = bell_track(server, !window_under(server));
-	drawer_hover_to(server, window_under(server) || on_clock || on_slip || on_bell ? -1
+	bool on_lamp = lamp_track(server, !window_under(server));
+	drawer_hover_to(server, window_under(server) || on_clock || on_slip || on_bell || on_lamp
+		? -1
 		: drawer_entry_at(server, server->cursor->x, server->cursor->y));
 	/* with the drawer out, the paper on the desk is not in reach */
 	if (server->drawer_t > 0.004) {
@@ -20370,6 +20642,11 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			return;
 		}
 		bell_press(server, event->button, &taken);
+		if (taken) {
+			return;
+		}
+		/* before the ALL APPS plate over it, whose reach is generous */
+		lamp_press(server, event->button, &taken);
 		if (taken) {
 			return;
 		}
@@ -20786,6 +21063,7 @@ static void output_frame_work(struct desk_server *server)
 	clock_tick_frame(server);
 	slips_tick_frame(server);
 	bell_tick_frame(server);
+	lamp_tick_frame(server);
 }
 
 static void output_frame(struct wl_listener *listener, void *data)

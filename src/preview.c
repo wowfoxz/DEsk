@@ -751,7 +751,8 @@ static int write_lock(const char *path, int w, int h)
 #define PREVIEW_USAGE "usage: desk-preview [-o file.png] [-s 1600x1000] [--no-window] " \
 	"[--closed] [--apps] [--shelf] [--console] [--post] [--sounds DIR] [--calendar] " \
 	"[--memo] [--lock] [--boot[=u,u,...]] [--agenda] [--book] [--book-anim[=u,u,...]] " \
-	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]] [--bell[=hot|press]]\n"
+	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]] [--bell[=hot|press]] " \
+	"[--lamp[=on|off|hot|pull]]\n"
 
 int main(int argc, char **argv)
 {
@@ -787,6 +788,14 @@ int main(int argc, char **argv)
 			const char *how = argv[i][6] == '=' ? argv[i] + 7 : "";
 			desk_bell_set(true, "Grok Bot", strcmp(how, "hot") == 0 ? 1.0 : 0.0,
 				strcmp(how, "press") == 0 ? 1.0 : 0.0);
+		} else if (strncmp(argv[i], "--lamp", 6) == 0
+			&& (argv[i][6] == '\0' || argv[i][6] == '=')) {
+			/* the reading lamp in the corner, as shell.conf's lamp leaves
+			 * it: on (the room as traced), off (the room without its
+			 * light), with the hand on it, or its chain pulled */
+			const char *how = argv[i][6] == '=' ? argv[i] + 7 : "on";
+			desk_lamp_set(strcmp(how, "off") == 0 ? 0.0 : 1.0,
+				strcmp(how, "hot") == 0 ? 1.0 : 0.0, strcmp(how, "pull") == 0 ? 1.0 : 0.0);
 		} else if (strcmp(argv[i], "--closed") == 0) {
 			drawer = 0.0;
 		} else if (strcmp(argv[i], "--shelf") == 0) {

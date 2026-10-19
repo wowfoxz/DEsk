@@ -692,6 +692,24 @@ int desk_tray_bottom(int w, int h);
 void desk_bell_set(bool shown, const char *name, double lift, double press);
 bool desk_bell_shown(void);
 bool desk_bell_hit(int w, int h, double px, double py, double open);
+/* The brass reading lamp on the tray, in the corner past the post box,
+ * under the ALL APPS plate, whose pull chain switches the light the desk
+ * is lit by (shell.conf's lamp): how far it is on (lit, 0 off to 1 on,
+ * for the filament coming up and going down), the hand on it (lift, 0 to
+ * 1) and its chain being pulled (pull, 0 to 1) -- drawn as the
+ * DESK_OVL_LAMP overlay. And whether a point on the screen, with the
+ * drawer out by open, is on it. */
+void desk_lamp_set(double lit, double lift, double pull);
+double desk_lamp_lit(void);
+bool desk_lamp_hit(int w, int h, double px, double py, double open);
+/* The room with that lamp off (dark, 0 for lit as it always was, to 1 for
+ * all the way off): the pool of light it threw taken back, the rest down
+ * to a dim, cool fill that leaves everything on the desk readable. Over
+ * the room and what is drawn on it, never over a window; drawn in screen
+ * coordinates (cr may be scaled down: it is all gradient). And how dark
+ * it leaves a point, for what shines through it. */
+void desk_draw_lamp_night(cairo_t *cr, int w, int h, double dark);
+double desk_lamp_night_alpha_at(int w, int h, double dark, double x, double y);
 int desk_drawer_pull_h(int w, int h);
 /* The lamp that what is drawn over the room is lit by, for which way
  * shadows fall and which side of a crease catches the light: the room's
@@ -1028,6 +1046,7 @@ enum desk_ovl {
 	DESK_OVL_POST,        /* the post box's plate, and a letter */
 	DESK_OVL_SLIPS,       /* the tray's slips, under the Control Panel */
 	DESK_OVL_BELL,        /* the bell on the tray (shell.conf's bell) */
+	DESK_OVL_LAMP,        /* the reading lamp on the tray (shell.conf's lamp) */
 	DESK_OVL_COUNT,
 };
 uint64_t desk_overlay_key(int which, time_t now, int unread);
