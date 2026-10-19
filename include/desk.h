@@ -1013,6 +1013,19 @@ bool desk_lock_key_at(int w, int h, double x, double y);
  * frame, and it will be put in when it is done. settle waits for it. */
 bool desk_lock_settling(void);
 void desk_lock_settle(void);
+/* The door traced on the GPU (doorgpu.h), every frame the fine one at the
+ * screen's own size: warm starts its programs compiling on a thread of
+ * their own (once; desk_draw_lock and desk_lock_gpu do it too), gpu says
+ * whether they are ready -- until then, and if they fail, the CPU tracer
+ * draws it -- and wait waits up to secs for them. DESK_DOOR_CPU=1: never. */
+void desk_lock_gpu_warm(void);
+bool desk_lock_gpu(void);
+bool desk_lock_gpu_wait(double secs);
+/* the size to draw the door at for a screen: its own on the GPU, as
+ * desk_overlay_size on the CPU */
+void desk_lock_size(int screen_w, int screen_h, int *ow, int *oh);
+/* how long the last door traced took, ms, and whether on the GPU */
+double desk_lock_last_ms(bool *gpu);
 
 /* What lies over the baked desk, one sprite at a time, so the compositor
  * can keep each and redraw one only when what it shows has changed. Each
