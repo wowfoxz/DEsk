@@ -93,7 +93,14 @@ if have_gpu
     command: [import('python').find_installation(), files('scripts/glsl2c.py'),
       'ROOM_GLSL', '@INPUT@', '@OUTPUT@'],
   )
-  draw_sources += ['src/gpu.c', room_glsl_h]
+  # The front door's, likewise (doorgpu.c runs it).
+  door_glsl_h = custom_target('door_glsl.h',
+    input: 'src/door.glsl',
+    output: 'door_glsl.h',
+    command: [import('python').find_installation(), files('scripts/glsl2c.py'),
+      'DOOR_GLSL', '@INPUT@', '@OUTPUT@'],
+  )
+  draw_sources += ['src/gpu.c', room_glsl_h, 'src/doorgpu.c', door_glsl_h]
   draw_deps += [egl, glesv2, gbm_dep]
   add_project_arguments('-DDESK_HAVE_GPU=1', language: 'c')
 endif
