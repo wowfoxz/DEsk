@@ -93,6 +93,7 @@
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
+#include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
@@ -19251,6 +19252,21 @@ static struct xkb_keymap *keyboard_keymap(const struct shell_conf *c, char *desc
 	return keymap;
 }
 
+/* (local) Num Lock comes on with every keyboard and every new keymap, so the
+ * keypad types numbers from the start */
+static void keyboard_numlock_on(struct wlr_keyboard *kb)
+{
+	if (!kb->keymap) {
+		return;
+	}
+	xkb_mod_index_t num = xkb_keymap_mod_get_index(kb->keymap, XKB_MOD_NAME_NUM);
+	if (num == XKB_MOD_INVALID) {
+		return;
+	}
+	wlr_keyboard_notify_modifiers(kb, kb->modifiers.depressed, kb->modifiers.latched,
+		kb->modifiers.locked | (1u << num), kb->modifiers.group);
+}
+
 static void server_new_keyboard(struct desk_server *server, struct wlr_input_device *device)
 {
 	struct wlr_keyboard *wlr_keyboard = wlr_keyboard_from_input_device(device);
@@ -19266,6 +19282,7 @@ static void server_new_keyboard(struct desk_server *server, struct wlr_input_dev
 		wlr_keyboard_set_keymap(wlr_keyboard, keymap);
 		xkb_keymap_unref(keymap);
 	}
+	keyboard_numlock_on(wlr_keyboard);
 	if (strcmp(desc, server->kb_applied)) {
 		wlr_log(WLR_INFO, "keyboard: %s", desc);
 		snprintf(server->kb_applied, sizeof server->kb_applied, "%s", desc);
@@ -19385,6 +19402,7 @@ static void input_apply(struct desk_server *server)
 			snprintf(server->kb_applied, sizeof server->kb_applied, "%s", desc);
 		}
 		wlr_keyboard_set_keymap(kb->wlr_keyboard, keymap);
+		keyboard_numlock_on(kb->wlr_keyboard);
 	}
 	if (keymap) {
 		xkb_keymap_unref(keymap);
