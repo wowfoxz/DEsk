@@ -141,7 +141,7 @@ executable('desk-preview',
   install: true,
 )
 
-wm_sources = proto_headers + ['src/wm.c', 'src/power.c', 'src/session.c', 'src/lock.c',
+wm_sources = proto_headers + ['src/wm.c', 'src/power.c', 'src/ddc.c', 'src/session.c', 'src/lock.c',
   'src/camera.c', 'src/occasion.c']
 wm_deps = [wlroots, wayland_server, xkbcommon, cairo, fontconfig, pixman, libdrm, math, threads]
 # the screen lock checks the password as login does

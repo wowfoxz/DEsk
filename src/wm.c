@@ -36,6 +36,7 @@
 #include "apps.h"
 #include "panel.h"
 #include "power.h"
+#include "ddc.h"
 #include "sound.h"
 /* What a letter is, bus or no bus: without one the box is simply empty. */
 #include "post.h"
@@ -1040,6 +1041,10 @@ struct desk_server {
 	double cc_screen;
 	bool cc_screen_ok;
 	struct wl_event_source *cc_screen_send;
+	/* no backlight, and the monitor's own light over DDC/CI (ddc.c)
+	 * instead; ddc_news is its thread saying it has found it, or not */
+	bool cc_screen_ddc;
+	struct wl_event_source *ddc_news;
 	/* The guarded set. The key turns itself once it is in, the glass swings
 	 * up, and the button that was pushed starts the machine going dark --
 	 * which is the only thing here that cannot be taken back. */
@@ -7446,6 +7451,11 @@ static void console_live(struct desk_server *server, bool on);
 static int screen_send_cb(void *data)
 {
 	struct desk_server *server = data;
+	if (server->cc_screen_ddc) {
+		/* handed to ddc.c's thread, which sends the latest when it can */
+		desk_ddc_set(server->cc_screen);
+		return 0;
+	}
 	if (!desk_backlight_set(server->cc_screen)) {
 		static bool said;
 		if (!said) {
@@ -7473,6 +7483,8 @@ static void screen_apply(struct desk_server *server)
 	}
 }
 
+static void paint_console(struct desk_server *server);
+
 /* Where the screen's light is now, as the machine has it -- something else
  * (the keys of a laptop, its power manager) may have turned it. */
 static void screen_read(struct desk_server *server)
@@ -7480,12 +7492,33 @@ static void screen_read(struct desk_server *server)
 	struct desk_supply su;
 	desk_supply_read(&su);
 	server->cc_screen_ok = su.have_backlight;
+	server->cc_screen_ddc = false;
 	if (su.have_backlight && server->cc_grab != DESK_CC_SCREEN) {
 		server->cc_screen = su.backlight;
 	}
+	/* a desktop's monitor, over DDC/CI, where there is no backlight: as
+	 * ddc.c last had it, read at the start or as it was last sent */
+	double v;
+	if (!su.have_backlight && desk_ddc_state(&v)) {
+		server->cc_screen_ok = true;
+		server->cc_screen_ddc = true;
+		if (server->cc_grab != DESK_CC_SCREEN) {
+			server->cc_screen = v;
+		}
+	}
 }
 
-static void paint_console(struct desk_server *server);
+/* ddc.c's thread has found the monitor (or found nobody there) */
+static int ddc_news_cb(int fd, uint32_t mask, void *data)
+{
+	(void)mask;
+	struct desk_server *server = data;
+	desk_ddc_drain(fd);
+	screen_read(server);
+	paint_console(server);
+	server_schedule_frames(server);
+	return 0;
+}
 
 /* The brightness keys a laptop has: the screen's light a step -- or, on a
  * machine with no backlight, the lamp over the desk. */
@@ -22767,6 +22800,16 @@ int main(int argc, char **argv)
 	server.cc_bright = 1.0;
 	server.cc_screen = 1.0;
 	screen_read(&server);
+	if (!server.cc_screen_ok) {
+		/* no backlight: perhaps the monitor will take it over DDC/CI. Its
+		 * thread looks, and says when it knows, without holding us up. */
+		int ddc_fd = desk_ddc_start();
+		if (ddc_fd >= 0) {
+			server.ddc_news = wl_event_loop_add_fd(
+				wl_display_get_event_loop(server.wl_display), ddc_fd,
+				WL_EVENT_READABLE, ddc_news_cb, &server);
+		}
+	}
 	server.cc_pressed = -1;
 	server.layer_top = wlr_scene_tree_create(&server.scene->tree);
 	server.layer_drag = wlr_scene_tree_create(&server.scene->tree);
