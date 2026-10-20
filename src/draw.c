@@ -2693,7 +2693,7 @@ static hit3 map_props3(vec3 p)
 /* the reading lamp's light, when it is on, in the views that trace it */
 static vec3 prop_lamp_light(vec3 p, vec3 n)
 {
-	if (g_room_layer < 3 || (g_room_props & (ROOM_PROP_LAMP | ROOM_PROP_LIT))
+	if (g_room_layer != 3 || (g_room_props & (ROOM_PROP_LAMP | ROOM_PROP_LIT))
 		!= (ROOM_PROP_LAMP | ROOM_PROP_LIT)) {
 		return v3(0, 0, 0);
 	}
@@ -2748,7 +2748,10 @@ static hit3 map_room(vec3 p)
 			v3(RM_HX - 0.6, 0.28, 0.34)), MID_DESK_BODY });
 		h = hmin3(h, room_gadgets(p));
 	}
-	if (g_room_layer >= 3) {
+	/* the props only in the bookcase's view and its move: the console's and
+	 * the post box's settle on pictures with none (the lamp came up
+	 * through the post box's last frames and went) */
+	if (g_room_layer == 3) {
 		h = hmin3(h, map_props3(p));
 	}
 

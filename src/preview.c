@@ -8,6 +8,7 @@
 #include "post.h"
 #include "sound.h"
 
+#include <unistd.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -851,6 +852,29 @@ int main(int argc, char **argv)
 			shelf = true;
 		} else if (strcmp(argv[i], "--console") == 0) {
 			console = true;
+		} else if (strncmp(argv[i], "--film=", 7) == 0) {
+			/* the traced move to the bookcase (0), console (1) or post box
+			 * (2), its frames stacked, desk first: written as it is */
+			int which = atoi(argv[i] + 7), fr = 0, fw = 0, fh = 0;
+			cairo_surface_t *strip = NULL;
+			const char *out = "film.png";
+			for (int j = 1; j < argc; j++) {
+				if (!strcmp(argv[j], "-o") && j + 1 < argc) out = argv[j + 1];
+			}
+			int sw = 1920, sh = 1080;
+			for (int j = 1; j < argc; j++) {
+				if (!strcmp(argv[j], "-s") && j + 1 < argc) sscanf(argv[j + 1], "%dx%d", &sw, &sh);
+			}
+			for (int tries = 0; tries < 300; tries++) {
+				struct desk_room_sheets rs;
+				desk_room_sheets(sw, sh, &rs);
+				if (desk_tilt_film(sw, sh, which, &strip, &fr, &fw, &fh) && strip) break;
+				sleep(1);
+			}
+			if (!strip) { fprintf(stderr, "no film\n"); return 1; }
+			cairo_surface_write_to_png(strip, out);
+			printf("film %d: %d frames %dx%d -> %s\n", which, fr, fw, fh, out);
+			return 0;
 		} else if (strcmp(argv[i], "--post") == 0) {
 			post = true;
 		} else if (strcmp(argv[i], "--sounds") == 0 && i + 1 < argc) {

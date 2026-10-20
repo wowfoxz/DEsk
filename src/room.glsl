@@ -1332,7 +1332,7 @@ hit3 map_props3(vec3 p)
 
 vec3 prop_lamp_light(vec3 p, vec3 n)
 {
-	if (u_layer < 3 || (u_props & 6) != 6) {
+	if (u_layer != 3 || (u_props & 6) != 6) {
 		return vec3(0.0);
 	}
 	vec3 d = prop_bulb() - p;
@@ -1385,7 +1385,7 @@ hit3 scene_map(vec3 p)
 			vec3(RM_HX - 0.6, 0.28, 0.34)), MID_DESK_BODY));
 		h = hmin3(h, room_gadgets(p));
 	}
-	if (u_layer >= 3) {
+	if (u_layer == 3) {
 		h = hmin3(h, map_props3(p));
 	}
 
