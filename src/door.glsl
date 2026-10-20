@@ -226,8 +226,8 @@ uniform float u_rm_s;
 uniform vec4 u_rm_shell;     /* wx, fy, cy, bz */
 uniform float u_rm_fz;
 uniform int u_rm_nbox;
-uniform vec3 u_rm_lo[12], u_rm_hi[12];
-uniform int u_rm_kind[12];
+uniform vec3 u_rm_lo[16], u_rm_hi[16];
+uniform int u_rm_kind[16];
 uniform vec3 u_rm_desk;      /* desk_hx, desk_z0, desk_z1 */
 uniform vec3 u_rm_wall, u_rm_ceil;
 uniform int u_pj_on[3];
@@ -280,6 +280,7 @@ uniform int u_has_sign, u_has_gold, u_has_plate, u_has_pic;
 #define LK_RM_CASE 3
 #define LK_RM_POST 4
 #define LK_RM_CONSOLE 5
+#define LK_RM_PROP 6
 
 #define LKD_WREATH 0
 #define LKD_GARLAND 1
@@ -2449,6 +2450,9 @@ vec3 lk_room_colour(vec3 p, vec3 n, int kind, inout int sub)
 		break;
 	case LK_RM_CONSOLE:
 		c = v3(0.050, 0.046, 0.042);
+		break;
+	case LK_RM_PROP:
+		c = v3(0.42, 0.31, 0.12);
 		break;
 	default:
 		if (n.y > 0.5) {

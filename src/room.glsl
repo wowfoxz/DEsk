@@ -27,6 +27,8 @@ uniform ivec2 u_frame;    /* the whole sheet, in samples */
 uniform vec3 u_eye, u_ww, u_uu, u_vv;
 uniform vec2 u_fov;
 uniform int u_layer;
+uniform int u_props;        /* draw.c's g_room_props */
+uniform float u_prop_bell;   /* where the bell stands, x */
 uniform float u_open, u_cc_out, u_pb_open;
 uniform float u_zf, u_aspect, u_sh_hx, u_hx;
 
@@ -285,6 +287,8 @@ key_light key_at(vec3 p)
 	return k;
 }
 
+vec3 prop_lamp_light(vec3 p, vec3 n);
+
 vec3 shelf_lamp_at(vec3 p, vec3 n)
 {
 	vec3 sum = vec3(0.0);
@@ -301,7 +305,7 @@ vec3 shelf_lamp_at(vec3 p, vec3 n)
 		float cone = smoothstepf(-0.05, 0.62, ax);
 		sum += SHELF_LAMP_COL * (SHELF_LAMP_IRR * cone * nol / (dist * dist));
 	}
-	return sum;
+	return sum + prop_lamp_light(p, n);
 }
 
 float lamp_radiance(key_light k)
@@ -1191,6 +1195,154 @@ hit3 map_shelf(vec3 p)
 
 /* ---- the room ---- */
 
+/* ---- the things that stand on the desk, in three dimensions ----
+ * draw.c's map_props3, to the number: the bell, the reading lamp and the
+ * knife by NO FATE, traced in layers 3 and up. u_props: 1 the bell, 2 the
+ * lamp, 4 the lamp lit, 8 the knife. */
+#define PR_LAMP_S 1.75
+#define PR_KNIFE_X (-6.75)
+#define PR_KNIFE_Z 4.55
+#define PR_KNIFE_LEN 4.00
+#define PR_KNIFE_ANG (-0.42)
+
+float sd_capsule(vec3 p, vec3 a, vec3 b, float r)
+{
+	vec3 pa = p - a, ba = b - a;
+	float h = clampf(dot(pa, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
+	return length(pa - ba * h) - r;
+}
+
+vec3 prop_bell_at()
+{
+	return vec3(u_prop_bell, 0.0, RM_ZF + 5.60);
+}
+
+vec3 prop_lamp_at()
+{
+	return vec3(RM_HX - 2.95, 0.0, RM_ZF + 5.60);
+}
+
+vec3 prop_bulb()
+{
+	vec3 b = prop_lamp_at();
+	return vec3(b.x, 0.92 * PR_LAMP_S - 0.12, b.z + 0.34 * PR_LAMP_S);
+}
+
+hit3 map_bell3(vec3 p)
+{
+	hit3 h = hit3(1e9, 0);
+	vec3 q = p - prop_bell_at();
+	float bound = length(q - vec3(0.0, 0.5, 0.0)) - 1.35;
+	if (bound > 1.0) {
+		return hit3(bound, 0);
+	}
+	h = hmin3(h, hit3(sd_round_box(q - vec3(0.0, 0.10, 0.0), vec3(0.78, 0.10, 0.78), 0.05),
+		MID_DESK_BODY));
+	float R = 0.623, cy = 0.20 + 0.56 - R;
+	float dome = max(length(q - vec3(0.0, cy, 0.0)) - R, 0.20 - q.y);
+	float rr = length(q.xz);
+	if (q.y > 0.55) {
+		float ang = atan2f(q.z, q.x);
+		float ring = abs(rr - 0.21) - 0.028;
+		ring = max(ring, -(abs(ang) - 0.55));
+		float bar = sd_box(vec3(q.x - 0.13, 0.0, q.z - 0.04), vec3(0.08, 1.0, 0.026));
+		float g = min(ring, bar);
+		dome = max(dome, -max(g, -(q.y - (cy + R - 0.035))));
+	}
+	h = hmin3(h, hit3(dome, MID_BRASS));
+	h = hmin3(h, hit3(sd_capsule(q, vec3(0.0, 0.70, 0.0), vec3(0.0, 0.90, 0.0), 0.04), MID_BRASS));
+	h = hmin3(h, hit3(length(q - vec3(0.0, 0.94, 0.0)) - 0.15, MID_BRASS));
+	return h;
+}
+
+hit3 map_lamp3(vec3 p)
+{
+	hit3 h = hit3(1e9, 0);
+	const float s = PR_LAMP_S;
+	vec3 q = p - prop_lamp_at();
+	float bound = length(q - vec3(0.0, 0.55 * s, 0.30 * s)) - 1.45 * s;
+	if (bound > 1.0) {
+		return hit3(bound, 0);
+	}
+	float foot = sd_cyl_y(q - vec3(0.0, 0.05 * s, 0.0), 0.44 * s - 0.04, 0.05 * s - 0.04) - 0.04;
+	foot = min(foot, sd_cyl_y(q - vec3(0.0, 0.13 * s, 0.0), 0.20 * s, 0.04 * s) - 0.02);
+	h = hmin3(h, hit3(foot, MID_BRASS));
+	float cy = 0.92 * s, cz = 0.34 * s, R = 0.34 * s, L = 1.12 * s;
+	vec3 sp = q - vec3(0.0, cy, cz);
+	float ryz = length(sp.yz);
+	float shade = max(max(ryz - R, abs(sp.x) - L), -(sp.y + 0.20 * R));
+	shade = max(shade, -max(ryz - (R - 0.06), abs(sp.x) - (L - 0.06)));
+	h = hmin3(h, hit3(shade, MID_PROP_SHADE));
+	float rim = max(abs(ryz - R) - 0.035, abs(abs(sp.x) - L + 0.02) - 0.035);
+	rim = max(rim, -(sp.y + 0.20 * R));
+	h = hmin3(h, hit3(rim, MID_BRASS));
+	h = hmin3(h, hit3(sd_capsule(q, vec3(0.0, 0.15 * s, 0.0), vec3(0.0, cy - 0.55 * R, cz * 0.7),
+		0.055 * s), MID_BRASS));
+	float kx = 0.66 * L, kz = cz + 0.85 * R;
+	vec3 top = vec3(kx, cy - 0.40 * R, kz), drop = vec3(kx, 0.30 * s, kz + 0.20 * s);
+	h = hmin3(h, hit3(sd_capsule(q, top, drop, 0.014 * s), MID_BRASS));
+	h = hmin3(h, hit3(sd_capsule(q, drop, drop - vec3(0.0, 0.08 * s, 0.0), 0.035 * s), MID_BRASS));
+	return h;
+}
+
+hit3 map_knife3(vec3 p)
+{
+	hit3 h = hit3(1e9, 0);
+	float dx = p.x - PR_KNIFE_X, dz = p.z - PR_KNIFE_Z;
+	float bound = sqrt(dx * dx + dz * dz + p.y * p.y) - (PR_KNIFE_LEN * 0.5 + 0.4);
+	if (bound > 1.0) {
+		return hit3(bound, 0);
+	}
+	float ca = cos(PR_KNIFE_ANG), sa = sin(PR_KNIFE_ANG), hl = PR_KNIFE_LEN * 0.5;
+	float u = dx * ca - dz * sa, v = dx * sa + dz * ca;
+	float b0 = -hl + PR_KNIFE_LEN * (1.0 - 0.58);
+	float t = clampf((hl - u) / (hl - b0), 0.0, 1.0);
+	float hw = 0.17 * sqrt(t);
+	float off = 0.03 * (1.0 - t);
+	float blade = abs(v - off) - hw;
+	blade = max(blade, max(b0 - u, u - hl));
+	float th = 0.035 * clampf(0.35 + 0.65 * (0.5 - (v - off) / max(hw * 2.0, 1e-3)), 0.2, 1.0);
+	blade = max(blade, abs(p.y - 0.035) - th);
+	h = hmin3(h, hit3(blade, MID_PROP_STEEL));
+	h = hmin3(h, hit3(sd_round_box(vec3(u - (b0 - 0.03), p.y - 0.07, v), vec3(0.055, 0.07, 0.39),
+		0.02), MID_CC_BAKELITE));
+	float g0 = -hl + 0.10, g1 = b0 - 0.09, gc = (g0 + g1) * 0.5, gh = (g1 - g0) * 0.5;
+	float grip = sd_round_box(vec3(u - gc, p.y - 0.10, v), vec3(gh, 0.10, 0.15), 0.09);
+	float rib = 0.012 * cos((u - g0) * 2.0 * M_PI / 0.18);
+	h = hmin3(h, hit3(grip + rib, MID_CC_BAKELITE));
+	h = hmin3(h, hit3(sd_cyl_y(vec3(u - (-hl + 0.10), p.y - 0.10, v), 0.15, 0.09) - 0.02,
+		MID_PROP_STEEL));
+	return h;
+}
+
+hit3 map_props3(vec3 p)
+{
+	hit3 h = hit3(1e9, 0);
+	if ((u_props & 8) != 0) {
+		h = hmin3(h, map_knife3(p));
+	}
+	if ((u_props & 1) != 0) {
+		h = hmin3(h, map_bell3(p));
+	}
+	if ((u_props & 2) != 0) {
+		h = hmin3(h, map_lamp3(p));
+	}
+	return h;
+}
+
+vec3 prop_lamp_light(vec3 p, vec3 n)
+{
+	if (u_layer < 3 || (u_props & 6) != 6) {
+		return vec3(0.0);
+	}
+	vec3 d = prop_bulb() - p;
+	float dist = max(length(d), 0.45);
+	vec3 l = d * (1.0 / dist);
+	float nol = max(dot(n, l), 0.0);
+	float cone = smoothstepf(0.10, 0.70, -l.y);
+	return vec3(1.00, 0.80, 0.52) * (PR_LAMP_IRR * cone * nol / (dist * dist));
+}
+
 bool room_is_drawer(int id)
 {
 	return !(id == MID_ROOM_FLOOR || id == MID_ROOM_WALL || id == MID_ROOM_SKIRT
@@ -1232,6 +1384,9 @@ hit3 scene_map(vec3 p)
 		h = hmin3(h, hit3(sd_box(p - vec3(0.0, -4.10, RM_ZN - 0.34),
 			vec3(RM_HX - 0.6, 0.28, 0.34)), MID_DESK_BODY));
 		h = hmin3(h, room_gadgets(p));
+	}
+	if (u_layer >= 3) {
+		h = hmin3(h, map_props3(p));
 	}
 
 	if (u_layer == 1 || u_layer >= 4) {
@@ -2107,6 +2262,23 @@ mtl icon_material(int id, vec3 pw)
 		m.coat = 1.0;
 		m.coat_rough = 0.035;
 		m.emit = tint * 0.10;
+		break;
+	}
+	case MID_PROP_STEEL: {
+		float brush = room_noise(w.x * 160.0 + w.z * 40.0, w.y * 30.0);
+		m.albedo = vec3(0.640, 0.650, 0.670) * (0.86 + brush * 0.20);
+		m.rough = 0.16 + brush * 0.10;
+		m.metal = 1.0;
+		m.dust = 0.2;
+		break;
+	}
+	case MID_PROP_SHADE: {
+		vec3 tint = vec3(0.060, 0.330, 0.120);
+		m.albedo = tint * 0.32;
+		m.rough = 0.06;
+		m.coat = 1.0;
+		m.coat_rough = 0.03;
+		m.emit = (u_props & 4) != 0 ? tint * 0.55 : tint * 0.02;
 		break;
 	}
 	case MID_GADGET_PAPER: {

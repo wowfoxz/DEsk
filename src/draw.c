@@ -679,6 +679,8 @@ static const vec3 SHELF_LAMP_COL = { 1.00, 0.86, 0.62 };
 static const vec3 SHELF_LAMP_AIM = { 0.0, -0.94, 0.34 };
 #define SHELF_LAMP_Y 7.85
 #define SHELF_LAMP_IRR 26.0
+#define PR_LAMP_IRR 9.0
+static vec3 prop_lamp_light(vec3 p, vec3 n);
 
 static vec3 shelf_lamp_at(vec3 p, vec3 n)
 {
@@ -697,7 +699,7 @@ static vec3 shelf_lamp_at(vec3 p, vec3 n)
 		sum = vadd(sum, vmul(SHELF_LAMP_COL,
 			SHELF_LAMP_IRR * cone * nol / (dist * dist)));
 	}
-	return sum;
+	return vadd(sum, prop_lamp_light(p, n));
 }
 
 /* Radiance of the lamp disc as a mirror would see it. A disc of angular
@@ -878,6 +880,8 @@ enum {
 	MID_POST_DARK,
 	MID_BOOK_LEATHER,
 	MID_BOOK_GILT,
+	MID_PROP_STEEL,
+	MID_PROP_SHADE,
 };
 
 static hit3 map_term(vec3 p)
@@ -2518,6 +2522,189 @@ static int room_is_drawer(int id)
 /* Declared up with the gadgets, which need to know whether the bookcase is
  * in this layer before they decide whether they exist. */
 
+/* ---- the things that stand on the desk, in three dimensions ----------
+ *
+ * The bell, the reading lamp and the knife by NO FATE are drawn over the
+ * desk view by cairo, as seen from straight above (bell_paint and the
+ * rest), where they can be touched and move. The other views -- the shelf,
+ * the console, the post box, and so the picture the door's walk ends on --
+ * look at the desk from the side, and there a picture laid flat on the
+ * wood is a picture: they are traced here as what they are, at the same
+ * places and sizes (BELL_WX, DLAMP_WX, KNIFE_X), in layers 3 and up only,
+ * so the desk view's sheets do not change. g_room_props says which there
+ * are (the bell comes and goes with shell.conf) and whether the lamp is
+ * lit; it is part of the room's cache tag. */
+enum { ROOM_PROP_BELL = 1, ROOM_PROP_LAMP = 2, ROOM_PROP_LIT = 4, ROOM_PROP_KNIFE = 8 };
+static int g_room_props = ROOM_PROP_LAMP | ROOM_PROP_LIT | ROOM_PROP_KNIFE;
+
+/* room units: the measures cairo draws them to (bell_paint, dlamp_paint,
+ * knife_paint), so the two agree */
+#define PR_LAMP_S 1.75
+#define PR_KNIFE_X (-6.75)
+#define PR_KNIFE_Z 4.55
+#define PR_KNIFE_LEN 4.00
+#define PR_KNIFE_ANG (-0.42)
+
+static double sd_capsule(vec3 p, vec3 a, vec3 b, double r)
+{
+	vec3 pa = vsub(p, a), ba = vsub(b, a);
+	double h = clampf(vdot(pa, ba) / fmax(vdot(ba, ba), 1e-12), 0.0, 1.0);
+	return vlen(vsub(pa, vmul(ba, h))) - r;
+}
+
+static vec3 prop_bell_at(void)
+{
+	const struct room_gadget *clk = &ROOM_GADGETS[DESK_GADGET_CLOCK];
+	return v3((clk->x + clk->hx + RM_PB_CX - RM_PB_HX - 0.16) * 0.5, 0.0, RM_ZF + 5.60);
+}
+
+static vec3 prop_lamp_at(void)
+{
+	return v3(RM_HX - 2.95, 0.0, RM_ZF + 5.60);
+}
+
+/* where the lamp's bulb is, under the middle of the shade */
+static vec3 prop_bulb(void)
+{
+	vec3 b = prop_lamp_at();
+	return v3(b.x, 0.92 * PR_LAMP_S - 0.12, b.z + 0.34 * PR_LAMP_S);
+}
+
+static hit3 map_bell3(vec3 p)
+{
+	hit3 h = { 1e9, 0 };
+	vec3 q = vsub(p, prop_bell_at());
+	double bound = vlen(vsub(q, v3(0, 0.5, 0))) - 1.35;
+	if (bound > 1.0) {
+		h.d = bound;
+		return h;
+	}
+	/* the walnut block */
+	h = hmin3(h, (hit3){ sd_round_box(vsub(q, v3(0, 0.10, 0)), v3(0.78, 0.10, 0.78), 0.05),
+		MID_DESK_BODY });
+	/* the dome, a cap of a sphere on the block, a G cut in its crown */
+	double R = 0.623, cy = 0.20 + 0.56 - R;
+	double dome = fmax(vlen(vsub(q, v3(0, cy, 0))) - R, 0.20 - q.y);
+	double rr = sqrt(q.x * q.x + q.z * q.z);
+	if (q.y > 0.55) {
+		double ang = atan2(q.z, q.x);
+		/* the ring of the G, open on the right, and its bar */
+		double ring = fabs(rr - 0.21) - 0.028;
+		ring = fmax(ring, -(fabs(ang) - 0.55));
+		double bar = sd_box(v3(q.x - 0.13, 0.0, q.z - 0.04), v3(0.08, 1.0, 0.026));
+		double g = fmin(ring, bar);
+		dome = fmax(dome, -fmax(g, -(q.y - (cy + R - 0.035))));
+	}
+	h = hmin3(h, (hit3){ dome, MID_BRASS });
+	/* the plunger */
+	h = hmin3(h, (hit3){ sd_capsule(q, v3(0, 0.70, 0), v3(0, 0.90, 0), 0.04), MID_BRASS });
+	h = hmin3(h, (hit3){ vlen(vsub(q, v3(0, 0.94, 0))) - 0.15, MID_BRASS });
+	return h;
+}
+
+static hit3 map_lamp3(vec3 p)
+{
+	hit3 h = { 1e9, 0 };
+	const double s = PR_LAMP_S;
+	vec3 q = vsub(p, prop_lamp_at());
+	double bound = vlen(vsub(q, v3(0, 0.55 * s, 0.30 * s))) - 1.45 * s;
+	if (bound > 1.0) {
+		h.d = bound;
+		return h;
+	}
+	/* the foot: a brass disc, stepped */
+	double foot = sd_cyl_y(vsub(q, v3(0, 0.05 * s, 0)), 0.44 * s - 0.04, 0.05 * s - 0.04) - 0.04;
+	foot = fmin(foot, sd_cyl_y(vsub(q, v3(0, 0.13 * s, 0)), 0.20 * s, 0.04 * s) - 0.02);
+	h = hmin3(h, (hit3){ foot, MID_BRASS });
+	/* the shade: a half cylinder of green cased glass across it, open below */
+	double cy = 0.92 * s, cz = 0.34 * s, R = 0.34 * s, L = 1.12 * s;
+	vec3 sp = vsub(q, v3(0, cy, cz));
+	double ryz = sqrt(sp.y * sp.y + sp.z * sp.z);
+	double shade = fmax(fmax(ryz - R, fabs(sp.x) - L), -(sp.y + 0.20 * R));
+	shade = fmax(shade, -fmax(ryz - (R - 0.06), fabs(sp.x) - (L - 0.06)));
+	h = hmin3(h, (hit3){ shade, MID_PROP_SHADE });
+	/* brass rims along its edges */
+	double rim = fmax(fabs(ryz - R) - 0.035, fabs(fabs(sp.x) - L + 0.02) - 0.035);
+	rim = fmax(rim, -(sp.y + 0.20 * R));
+	h = hmin3(h, (hit3){ rim, MID_BRASS });
+	/* the stem, leaning out to the shade's middle */
+	h = hmin3(h, (hit3){ sd_capsule(q, v3(0, 0.15 * s, 0), v3(0, cy - 0.55 * R, cz * 0.7),
+		0.055 * s), MID_BRASS });
+	/* the pull chain and its drop */
+	double kx = 0.66 * L, kz = cz + 0.85 * R;
+	vec3 top = v3(kx, cy - 0.40 * R, kz), drop = v3(kx, 0.30 * s, kz + 0.20 * s);
+	h = hmin3(h, (hit3){ sd_capsule(q, top, drop, 0.014 * s), MID_BRASS });
+	h = hmin3(h, (hit3){ sd_capsule(q, drop, vsub(drop, v3(0, 0.08 * s, 0)), 0.035 * s),
+		MID_BRASS });
+	return h;
+}
+
+static hit3 map_knife3(vec3 p)
+{
+	hit3 h = { 1e9, 0 };
+	double dx = p.x - PR_KNIFE_X, dz = p.z - PR_KNIFE_Z;
+	double bound = sqrt(dx * dx + dz * dz + p.y * p.y) - (PR_KNIFE_LEN * 0.5 + 0.4);
+	if (bound > 1.0) {
+		h.d = bound;
+		return h;
+	}
+	double ca = cos(PR_KNIFE_ANG), sa = sin(PR_KNIFE_ANG), hl = PR_KNIFE_LEN * 0.5;
+	/* along it (tip at +hl) and across it */
+	double u = dx * ca - dz * sa, v = dx * sa + dz * ca;
+	double b0 = -hl + PR_KNIFE_LEN * (1.0 - 0.58);
+	/* the blade: thin, a clip point, its spine to one side */
+	double t = clampf((hl - u) / (hl - b0), 0.0, 1.0);
+	double hw = 0.17 * sqrt(t);
+	double off = 0.03 * (1.0 - t);
+	double blade = fabs(v - off) - hw;
+	blade = fmax(blade, fmax(b0 - u, u - hl));
+	/* thicker at the spine, ground to the edge */
+	double th = 0.035 * clampf(0.35 + 0.65 * (0.5 - (v - off) / fmax(hw * 2.0, 1e-3)), 0.2, 1.0);
+	blade = fmax(blade, fabs(p.y - 0.035) - th);
+	h = hmin3(h, (hit3){ blade, MID_PROP_STEEL });
+	/* the guard across it, blackened */
+	h = hmin3(h, (hit3){ sd_round_box(v3(u - (b0 - 0.03), p.y - 0.07, v), v3(0.055, 0.07, 0.39),
+		0.02), MID_CC_BAKELITE });
+	/* the grip, ribbed, and the pommel nut */
+	double g0 = -hl + 0.10, g1 = b0 - 0.09, gc = (g0 + g1) * 0.5, gh = (g1 - g0) * 0.5;
+	double grip = sd_round_box(v3(u - gc, p.y - 0.10, v), v3(gh, 0.10, 0.15), 0.09);
+	double rib = 0.012 * cos((u - g0) * 2.0 * M_PI / 0.18);
+	h = hmin3(h, (hit3){ grip + rib, MID_CC_BAKELITE });
+	h = hmin3(h, (hit3){ sd_cyl_y(v3(u - (-hl + 0.10), p.y - 0.10, v), 0.15, 0.09) - 0.02,
+		MID_PROP_STEEL });
+	return h;
+}
+
+static hit3 map_props3(vec3 p)
+{
+	hit3 h = { 1e9, 0 };
+	if (g_room_props & ROOM_PROP_KNIFE) {
+		h = hmin3(h, map_knife3(p));
+	}
+	if (g_room_props & ROOM_PROP_BELL) {
+		h = hmin3(h, map_bell3(p));
+	}
+	if (g_room_props & ROOM_PROP_LAMP) {
+		h = hmin3(h, map_lamp3(p));
+	}
+	return h;
+}
+
+/* the reading lamp's light, when it is on, in the views that trace it */
+static vec3 prop_lamp_light(vec3 p, vec3 n)
+{
+	if (g_room_layer < 3 || (g_room_props & (ROOM_PROP_LAMP | ROOM_PROP_LIT))
+		!= (ROOM_PROP_LAMP | ROOM_PROP_LIT)) {
+		return v3(0, 0, 0);
+	}
+	vec3 d = vsub(prop_bulb(), p);
+	double dist = fmax(vlen(d), 0.45);
+	vec3 l = vmul(d, 1.0 / dist);
+	double nol = fmax(vdot(n, l), 0.0);
+	double cone = smoothstepf(0.10, 0.70, -l.y);
+	return vmul(v3(1.00, 0.80, 0.52), PR_LAMP_IRR * cone * nol / (dist * dist));
+}
+
 static hit3 map_room(vec3 p)
 {
 	hit3 h = { 1e9, 0 };
@@ -2560,6 +2747,9 @@ static hit3 map_room(vec3 p)
 		h = hmin3(h, (hit3){ sd_box(vsub(p, v3(0, -4.10, RM_ZN - 0.34)),
 			v3(RM_HX - 0.6, 0.28, 0.34)), MID_DESK_BODY });
 		h = hmin3(h, room_gadgets(p));
+	}
+	if (g_room_layer >= 3) {
+		h = hmin3(h, map_props3(p));
 	}
 
 	if (g_room_layer == 1 || g_room_layer >= 4) {
@@ -3675,6 +3865,26 @@ static void icon_material(int kind, int id, vec3 p, struct mtl *m)
 		m->emit = vmul(tint, 0.10);
 		break;
 	}
+	case MID_PROP_STEEL: {
+		/* the knife: ground steel, the grind marks running along it */
+		double brush = room_noise(w.x * 160.0 + w.z * 40.0, w.y * 30.0);
+		m->albedo = vmul(v3(0.640, 0.650, 0.670), 0.86 + brush * 0.20);
+		m->rough = 0.16 + brush * 0.10;
+		m->metal = 1.0;
+		m->dust = 0.2;
+		break;
+	}
+	case MID_PROP_SHADE: {
+		/* green cased glass over opal: dark and glossy outside, and with
+		 * the lamp on, glowing through */
+		vec3 tint = v3(0.060, 0.330, 0.120);
+		m->albedo = vmul(tint, 0.32);
+		m->rough = 0.06;
+		m->coat = 1.0;
+		m->coat_rough = 0.03;
+		m->emit = (g_room_props & ROOM_PROP_LIT) ? vmul(tint, 0.55) : vmul(tint, 0.02);
+		break;
+	}
 	case MID_GADGET_PAPER: {
 		double fib = room_fbm(w.x * 40.0, w.z * 40.0);
 		double age = clampf(room_fbm2(w.x * 1.7 + 5.0, w.y * 1.7) * 1.5 - 0.25, 0.0, 1.0);
@@ -4013,7 +4223,7 @@ static void blur_pass_rect(float *buf, float *tmp, int w, int h, int stride)
 
 static unsigned icon_build_tag(void)
 {
-	return DESK_ROOM_GLSL_KEY ^ (ROOM_LOOK * 2654435761u);
+	return DESK_ROOM_GLSL_KEY ^ (ROOM_LOOK * 2654435761u) ^ ((unsigned)g_room_props * 0x9e3779b1u);
 }
 
 /* whether this machine's GPU traces the room right: asked again when the
@@ -4741,6 +4951,7 @@ static void gb_varr(struct glsl_buf *b, const char *name, const vec3 *v, int n)
 	X(MID_CC_GLASS) X(MID_CC_CHEEK) X(MID_CC_LENS_AMBER) \
 	X(MID_CC_LENS_GREEN) X(MID_CC_LENS_BLUE) X(MID_CC_LENS_RED) \
 	X(MID_POST_RED) X(MID_POST_DARK) X(MID_BOOK_LEATHER) X(MID_BOOK_GILT) \
+	X(MID_PROP_STEEL) X(MID_PROP_SHADE) \
 	X(CC_WIFI) X(CC_BT) X(CC_VOL) X(CC_BRIGHT) X(CC_CRT) X(CC_BATT) \
 	X(CC_NET) X(CC_PW_OFF) X(CC_PW_BOOT) X(CC_PW_OUT) X(CC_PW_KEY) X(CC_SCREEN) X(CC_LOCK) \
 	X(CC_COUNT) \
@@ -4767,7 +4978,7 @@ static void gb_varr(struct glsl_buf *b, const char *name, const vec3 *v, int n)
 	X(RM_PB_FS_Y) X(RM_PB_FS_HU) X(RM_PB_FS_HH) X(RM_PB_FS_FR) \
 	X(RM_PB_HOOD_OUT) X(RM_PB_HOOD_TILT) \
 	X(RM_PB_TOP_GAP) \
-	X(SHELF_LAMP_Y) X(SHELF_LAMP_IRR) X(LIT_KEY_IRRADIANCE) \
+	X(SHELF_LAMP_Y) X(SHELF_LAMP_IRR) X(PR_LAMP_IRR) X(LIT_KEY_IRRADIANCE) \
 	X(ROOM_LAMP_REF0) X(ROOM_LAMP_RADIUS0) X(ROOM_LAMP_CONE_IN) \
 	X(ROOM_LAMP_CONE_OUT) \
 	X(CAL_T) X(CAL_PZ) X(CAL_PY0) X(CAL_PTOP) X(CAL_PIN) X(CAL_TB) \
@@ -5350,13 +5561,14 @@ static void room_gpu_uniforms_one(struct desk_gpu *g, const struct room_ctx *ctx
 	float fov[2] = { (float)c->fov_x, (float)c->fov_y };
 	desk_gpu_set(g, "u_fov", fov, 2);
 	desk_gpu_set_int(g, "u_layer", ctx->layer);
+	desk_gpu_set_int(g, "u_props", g_room_props);
 	const struct {
 		const char *name;
 		double v;
 	} f[] = {
 		{ "u_open", g_room_open }, { "u_cc_out", g_cc_out }, { "u_pb_open", g_pb_open },
 		{ "u_zf", g_rm_zf }, { "u_aspect", g_rm_aspect }, { "u_sh_hx", g_rm_sh_hx },
-		{ "u_hx", g_rm_hx },
+		{ "u_hx", g_rm_hx }, { "u_prop_bell", prop_bell_at().x },
 	};
 	for (size_t i = 0; i < sizeof f / sizeof f[0]; i++) {
 		float v = (float)f[i].v;
@@ -30248,6 +30460,9 @@ bool desk_shelf_memo_hit(int w, int h, double x, double y)
 #define BELL_KNOB 0.15        /* the plunger's head */
 #define BELL_KNOB_Y (BELL_BASE_T + BELL_DOME_H + 0.20)   /* up to it, at rest */
 #define BELL_KNOB_TRAVEL 0.13 /* how far it goes down when struck */
+#define BELL_WX ((ROOM_GADGETS[DESK_GADGET_CLOCK].x + ROOM_GADGETS[DESK_GADGET_CLOCK].hx \
+	+ RM_PB_CX - RM_PB_HX - 0.16) * 0.5)
+#define BELL_WZ (RM_ZF + 5.60)
 
 static struct {
 	bool shown;
@@ -30259,6 +30474,7 @@ static struct {
 void desk_bell_set(bool shown, const char *name, double lift, double press)
 {
 	g_bell.shown = shown;
+	g_room_props = shown ? (g_room_props | ROOM_PROP_BELL) : (g_room_props & ~ROOM_PROP_BELL);
 	snprintf(g_bell.name, sizeof g_bell.name, "%s", name ? name : "");
 	g_bell.lift = clampf(lift, 0.0, 1.0);
 	g_bell.press = clampf(press, 0.0, 1.0);
@@ -30296,7 +30512,6 @@ static bool bell_point(const struct room_xf *xf, double x, double y, double z,
 	return true;
 }
 
-double desk_drawer_rise(int w, int h);
 
 static bool bell_geo_at(const struct room_xf *xf, double x, double z, double s,
 	struct bell_geo *g)
@@ -30315,34 +30530,10 @@ static bool bell_geo(int w, int h, double open, struct bell_geo *g)
 	if (!g_bell.shown || !room_xform(w, h, open, &xf)) {
 		return false;
 	}
-	struct room_xf x0f = xf;
-	if (open > 0.0 && !room_xform(w, h, 0.0, &x0f)) {
-		return false;
-	}
-	/* Out on the desk, under the gap between the clock and the post box
-	 * and forward of the tray: at its own size, and far enough forward to
-	 * be still in sight with the drawer out. */
-	const struct room_gadget *clk = &ROOM_GADGETS[DESK_GADGET_CLOCK];
-	double x0 = clk->x + clk->hx, x1 = RM_PB_CX - RM_PB_HX - 0.16;
-	double x = (x0 + x1) * 0.5, s = 1.0;
-	double z = RM_ZF + BELL_BASE + 0.10;
-	double top = (double)desk_tray_bottom(w, h), rise = desk_drawer_rise(w, h);
-	struct bell_geo t;
-	for (int it = 0; it < 120; it++) {
-		if (!bell_geo_at(&x0f, x, z, s, &t)) {
-			return false;
-		}
-		double y = fmin(t.ky - BELL_KNOB * s * t.kp, t.ty - BELL_BASE * s * t.tp);
-		if (y >= top + 0.15 * t.tp && y + rise >= 0.70 * t.tp) {
-			break;
-		}
-		z += 0.05;
-	}
-	if (open <= 0.0) {
-		*g = t;
-		return true;
-	}
-	return bell_geo_at(&xf, x, z, s, g);
+	/* out on the desk under the gap between the clock and the post box,
+	 * forward of the tray: still in sight with the drawer out (BELL_WX,
+	 * BELL_WZ, as the shelf view traces it) */
+	return bell_geo_at(&xf, BELL_WX, BELL_WZ, 1.0, g);
 }
 
 /* The size the chalked name is written at, and how wide it comes out. */
@@ -30612,6 +30803,8 @@ static void bell_paint(cairo_t *cr, int w, int h, double open)
  * Room units, before it is made smaller where the corner is tight. */
 #define DLAMP_SIZE 1.75      /* all of it, on the measures below: a lamp a
                                  * reading lamp's size beside the post box */
+#define DLAMP_WX (RM_HX - 2.95)
+#define DLAMP_WZ (RM_ZF + 5.60)
 #define DLAMP_FOOT 0.44       /* the foot's radius */
 #define DLAMP_FOOT_T 0.10     /* and how thick it is */
 #define DLAMP_H 0.92          /* the shade's middle, up off the desk */
@@ -30654,21 +30847,6 @@ struct dlamp_geo {
 	double ux, uy, up;
 };
 
-/* How far down the screen the ALL APPS plate can reach, worked out as
- * desk_allapps_box does without asking the tray (which asks this). */
-static double dlamp_plate_bottom(int w, int h, const struct room_xf *xf)
-{
-	double t = fmax(32.4 * desk_px_per_pt(w), 20.0);
-	double margin = t * 0.40;
-	double mid = h * 0.034;
-	double u, v;
-	vec3 c = pb_cap_to_world(0.0, RM_PB_CAP_T * 0.5,
-		(RM_PB_HZ - 0.10 + RM_PB_SLOT_S + RM_PB_SLOT_HS + 0.30) * 0.5);
-	if (room_project(&xf->rr->cam, c, &u, &v)) {
-		mid = xf->oy + v * xf->rr->h * xf->scale;
-	}
-	return fmax(mid - t * 0.5, margin * 0.5) + t;
-}
 
 static bool dlamp_at(const struct room_xf *xf, double x, double z, double s,
 	struct dlamp_geo *g)
@@ -30692,18 +30870,6 @@ static bool dlamp_at(const struct room_xf *xf, double x, double z, double s,
 		&& bell_point(xf, x, 0.0, zs + 0.55 * s, &g->ux, &g->uy, &g->up);
 }
 
-/* How far up the screen the desk goes with the drawer all the way out
- * (negative: up): what stands on the desk has to be far enough forward to
- * be still in sight then. */
-double desk_drawer_rise(int w, int h);
-double desk_drawer_rise(int w, int h)
-{
-	struct room_xf a, b;
-	if (!room_xform(w, h, 0.0, &a) || !room_xform(w, h, 1.0, &b)) {
-		return 0.0;
-	}
-	return b.oy - a.oy;
-}
 
 static bool dlamp_geo(int w, int h, double open, struct dlamp_geo *g)
 {
@@ -30711,48 +30877,10 @@ static bool dlamp_geo(int w, int h, double open, struct dlamp_geo *g)
 	if (!room_xform(w, h, open, &xf)) {
 		return false;
 	}
-	/* Laid out with the drawer shut, and moved with the desk after. */
-	struct room_xf x0f = xf;
-	if (open > 0.0 && !room_xform(w, h, 0.0, &x0f)) {
-		return false;
-	}
-	/* Out on the desk in the right-hand corner, forward of the tray and of
-	 * the ALL APPS plate, at its own size: a banker's lamp is about as long
-	 * as the post box is wide, and it is never made smaller to fit. */
-	double s = DLAMP_SIZE;
-	double x = RM_HX - (DLAMP_SHADE + 0.55) * s;
-	double z = RM_ZF + DLAMP_FOOT * s + 0.12;
-	double top = fmax((double)desk_tray_bottom(w, h), dlamp_plate_bottom(w, h, &x0f));
-	double rise = desk_drawer_rise(w, h);
-	struct dlamp_geo t;
-	/* and clear of the right edge of the screen */
-	for (int it = 0; it < 3; it++) {
-		if (!dlamp_at(&x0f, x, z, s, &t)) {
-			return false;
-		}
-		double over = fmax(t.lx, t.rx) + 0.40 * t.cp - w;
-		if (over <= 0.0) {
-			break;
-		}
-		x -= over / fmax(t.cp, 1e-6);
-	}
-	for (int it = 0; it < 120; it++) {
-		if (!dlamp_at(&x0f, x, z, s, &t)) {
-			return false;
-		}
-		double shade_top = t.cy - DLAMP_SHADE_R * s * t.cp;
-		double foot_top = t.by - DLAMP_FOOT * s * t.bp;
-		double y = fmin(shade_top, foot_top);
-		if (y >= top + 0.15 * t.cp && y + rise >= 0.70 * t.cp) {
-			break;
-		}
-		z += 0.05;
-	}
-	if (open <= 0.0) {
-		*g = t;
-		return true;
-	}
-	return dlamp_at(&xf, x, z, s, g);
+	/* Out on the desk in the right-hand corner, forward of the tray, at a
+	 * fixed spot on the desk (DLAMP_WX, DLAMP_WZ) so that the shelf view and
+	 * the door's walk, which trace it, have it where the desk view draws it */
+	return dlamp_at(&xf, DLAMP_WX, DLAMP_WZ, DLAMP_SIZE, g);
 }
 
 /* The extent of what is touched on the screen (x0, y0, x1, y1): the
@@ -31617,71 +31745,6 @@ static void gadget_face_paint(cairo_t *cr, const struct room_gadget *g, int i,
 /* The three stood up on the bookcase shelf, through the bookcase's own
  * camera. They are not on the desk any more, so nothing in the desk view
  * draws them. */
-/* What stands on the desk and is drawn over the room rather than traced
- * in it -- the knife by the carving, the bell, the reading lamp -- in the
- * shelf view (and so in the picture the door's walk ends on): each drawn
- * as from above, onto a patch of the desk top, and the patch laid on the
- * desk as the shelf's camera sees it. */
-static void shelf_desk_patch(cairo_t *cr, int w, int h, const struct room_cam *cam,
-	double ox, double oy, double sw, double sh, double x0, double z0, double x1, double z1,
-	void (*paint)(cairo_t *, int, int, double))
-{
-	struct room_xf xf;
-	if (!room_xform(w, h, 0.0, &xf)) {
-		return;
-	}
-	double ax, ay, bx, by, cx, cy, d;
-	if (!bell_point(&xf, x0, 0.0, z0, &ax, &ay, &d) || !bell_point(&xf, x1, 0.0, z0, &bx, &by, &d)
-		|| !bell_point(&xf, x0, 0.0, z1, &cx, &cy, &d)) {
-		return;
-	}
-	int lw = (int)ceil(hypot(bx - ax, by - ay)), lh = (int)ceil(hypot(cx - ax, cy - ay));
-	if (lw < 4 || lh < 4 || lw > 4096 || lh > 4096) {
-		return;
-	}
-	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, lw, lh);
-	cairo_t *ic = cairo_create(img);
-	cairo_matrix_t toscr, inv;
-	cairo_matrix_init(&toscr, (bx - ax) / lw, (by - ay) / lw, (cx - ax) / lh, (cy - ay) / lh,
-		ax, ay);
-	inv = toscr;
-	if (cairo_matrix_invert(&inv) == CAIRO_STATUS_SUCCESS) {
-		cairo_set_matrix(ic, &inv);
-		paint(ic, w, h, 0.0);
-	}
-	cairo_destroy(ic);
-	cairo_surface_flush(img);
-	vec3 q[4] = { v3(x0, 0.0, z0), v3(x1, 0.0, z0), v3(x0, 0.0, z1), v3(x1, 0.0, z1) };
-	cairo_matrix_t m;
-	if (quad_matrix(cam, q, lw, lh, ox, oy, sw, sh, &m)) {
-		cairo_save(cr);
-		cairo_transform(cr, &m);
-		cairo_set_source_surface(cr, img, 0, 0);
-		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
-		cairo_paint(cr);
-		cairo_restore(cr);
-	}
-	cairo_surface_destroy(img);
-}
-
-static void shelf_desk_things(cairo_t *cr, int w, int h, const struct room_cam *cam,
-	double ox, double oy, double sw, double sh)
-{
-	double hl = KNIFE_LEN * 0.5 + 0.8;
-	shelf_desk_patch(cr, w, h, cam, ox, oy, sw, sh, KNIFE_X - hl, KNIFE_Z - hl,
-		KNIFE_X + hl, KNIFE_Z + hl, knife_paint);
-	/* the bell and the lamp: where they stand, found from above */
-	struct bell_geo bg;
-	if (bell_geo(w, h, 0.0, &bg)) {
-		const struct room_gadget *clk = &ROOM_GADGETS[DESK_GADGET_CLOCK];
-		double x = (clk->x + clk->hx + RM_PB_CX - RM_PB_HX - 0.16) * 0.5;
-		shelf_desk_patch(cr, w, h, cam, ox, oy, sw, sh, x - 2.0, RM_ZF - 0.5, x + 2.0,
-			RM_ZF + 6.0, bell_paint);
-	}
-	shelf_desk_patch(cr, w, h, cam, ox, oy, sw, sh, RM_HX - 7.5, RM_ZF - 0.5, RM_HX + 0.5,
-		RM_ZF + 7.0, dlamp_paint);
-}
-
 void desk_draw_shelf_gadgets(cairo_t *cr, int screen_w, int screen_h, time_t now)
 {
 	struct room_render *rr;
@@ -31697,8 +31760,6 @@ void desk_draw_shelf_gadgets(cairo_t *cr, int screen_w, int screen_h, time_t now
 		gadget_face_paint(cr, g, i, &rr->shelf_cam, ox, oy,
 			rr->w * scale, rr->h * scale, now, 0.92);
 	}
-	shelf_desk_things(cr, screen_w, screen_h, &rr->shelf_cam, ox, oy, rr->w * scale,
-		rr->h * scale);
 }
 
 /* ---- the shelf view, as sprites ------------------------------------
@@ -32227,14 +32288,15 @@ struct lk_proj {
 	bool on;
 };
 
-enum { LK_RM_SHELL = 0, LK_RM_DESK, LK_RM_LEG, LK_RM_CASE, LK_RM_POST, LK_RM_CONSOLE };
+enum { LK_RM_SHELL = 0, LK_RM_DESK, LK_RM_LEG, LK_RM_CASE, LK_RM_POST, LK_RM_CONSOLE, LK_RM_PROP };
+#define LK_RM_BOXES 16
 
 struct lk_room {
 	bool on;
 	vec3 t;                     /* the room's origin, in the street's metres */
 	double s;
 	double wx, fy, cy, bz, fz;  /* the walls: x within +-wx, floor, ceiling, back, front */
-	struct { vec3 lo, hi; int kind; } box[12];
+	struct { vec3 lo, hi; int kind; } box[LK_RM_BOXES];
 	int nbox;
 	double desk_hx, desk_z0, desk_z1;
 	struct lk_proj proj[3];     /* the view the walk ends on; the bookcase as traced (if that
@@ -34625,6 +34687,9 @@ static vec3 lk_room_colour(const struct lk_scene *sc, vec3 p, vec3 n, int kind, 
 	case LK_RM_CONSOLE:
 		c = v3(0.050, 0.046, 0.042);
 		break;
+	case LK_RM_PROP:
+		c = v3(0.42, 0.31, 0.12);   /* brass, where no picture saw it */
+		break;
 	default:
 		if (n.y > 0.5) {
 			/* the floor: boards running away from the door */
@@ -34900,6 +34965,24 @@ static bool lk_room_build(struct lk_room *rm, int w, int h, int view, cairo_surf
 	/* the post box on the desk */
 	LK_RM_BOX(RM_PB_CX - RM_PB_HX, 0.0, RM_PB_CZ - RM_PB_HZ, RM_PB_CX + RM_PB_HX,
 		RM_PB_SHOULDER + RM_PB_CAP_T, RM_PB_CZ + RM_PB_HZ, LK_RM_POST);
+	/* what stands on the desk (map_props3): the lamp's shade, and its foot
+	 * and stem; the bell's block, and its dome. The pictures are laid on
+	 * them as on the post box -- the view the walk ends on has them traced
+	 * in the round, the desk from above has them as the desk view draws
+	 * them -- so they stand up off the top as the eye walks back. The
+	 * knife lies flat: the top is its box. */
+	if (g_room_props & ROOM_PROP_LAMP) {
+		vec3 b = prop_lamp_at();
+		double s = PR_LAMP_S, cy = 0.92 * s, cz = b.z + 0.34 * s, R = 0.34 * s, L = 1.12 * s;
+		LK_RM_BOX(b.x - L, cy - 0.20 * R, cz - R, b.x + L, cy + R, cz + R, LK_RM_PROP);
+		LK_RM_BOX(b.x - 0.44 * s, 0.0, b.z - 0.44 * s, b.x + 0.44 * s, cy - 0.20 * R,
+			b.z + 0.44 * s, LK_RM_PROP);
+	}
+	if (g_room_props & ROOM_PROP_BELL) {
+		vec3 b = prop_bell_at();
+		LK_RM_BOX(b.x - 0.78, 0.0, b.z - 0.78, b.x + 0.78, 0.20, b.z + 0.78, LK_RM_PROP);
+		LK_RM_BOX(b.x - 0.55, 0.20, b.z - 0.55, b.x + 0.55, 1.09, b.z + 0.55, LK_RM_PROP);
+	}
 	if (view == DESK_VIEW_CONSOLE) {
 		/* the Control Panel, out, as it is looked at */
 		double dz = cc_dz(1.0, aspect);
@@ -35847,9 +35930,9 @@ static void lk_gpu_uniforms(struct door_gpu_frame *fr, const struct lk_scene *sc
 	F4("u_rm_shell", rm->wx, rm->fy, rm->cy, rm->bz);
 	F1("u_rm_fz", rm->fz);
 	I1("u_rm_nbox", rm->nbox);
-	float blo[36], bhi[36];
-	int bk[12];
-	for (int i = 0; i < 12; i++) {
+	float blo[LK_RM_BOXES * 3], bhi[LK_RM_BOXES * 3];
+	int bk[LK_RM_BOXES];
+	for (int i = 0; i < LK_RM_BOXES; i++) {
 		blo[i * 3] = (float)rm->box[i].lo.x;
 		blo[i * 3 + 1] = (float)rm->box[i].lo.y;
 		blo[i * 3 + 2] = (float)rm->box[i].lo.z;
@@ -35858,9 +35941,9 @@ static void lk_gpu_uniforms(struct door_gpu_frame *fr, const struct lk_scene *sc
 		bhi[i * 3 + 2] = (float)rm->box[i].hi.z;
 		bk[i] = rm->box[i].kind;
 	}
-	door_gpu_f(fr, "u_rm_lo", 3, 12, blo);
-	door_gpu_f(fr, "u_rm_hi", 3, 12, bhi);
-	door_gpu_i(fr, "u_rm_kind", 12, bk);
+	door_gpu_f(fr, "u_rm_lo", 3, LK_RM_BOXES, blo);
+	door_gpu_f(fr, "u_rm_hi", 3, LK_RM_BOXES, bhi);
+	door_gpu_i(fr, "u_rm_kind", LK_RM_BOXES, bk);
 	F3("u_rm_desk", rm->desk_hx, rm->desk_z0, rm->desk_z1);
 	V3("u_rm_wall", rm->wall);
 	V3("u_rm_ceil", rm->ceil);
