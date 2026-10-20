@@ -32297,6 +32297,7 @@ struct lk_room {
 	double s;
 	double wx, fy, cy, bz, fz;  /* the walls: x within +-wx, floor, ceiling, back, front */
 	struct { vec3 lo, hi; int kind; } box[LK_RM_BOXES];
+	int props;                  /* what stands on the desk (ROOM_PROP_*), the lamp as lit */
 	int nbox;
 	double desk_hx, desk_z0, desk_z1;
 	struct lk_proj proj[3];     /* the view the walk ends on; the bookcase as traced (if that
@@ -33389,6 +33390,181 @@ static void lk_door_hit(const struct lk_scene *sc, vec3 ro, vec3 rd, struct lk_h
 }
 
 /* the nearest thing in the room along o + d t, from inside it (units) */
+/* ---- what stands on the desk, in the door's room ----
+ *
+ * The bell, the reading lamp and the knife are traced here in the round,
+ * by the room tracer's own distance field (map_props3), not laid on boxes
+ * as pictures: as the eye walks back they keep their volume, catch the
+ * room's lamp (ROOM_LAMP_POS, the light the pictures were traced in) and
+ * throw their own soft shadows on the desk where no picture has one. A
+ * point a picture would show through one of them is not taken from that
+ * picture (lk_room_trace sees them), so nothing of them is there twice.
+ * rm->props: draw.c's ROOM_PROP_* bits; LIT as the lamp is now. */
+#define LK_RM_PROPK 100    /* kind = LK_RM_PROPK + the material below */
+enum { LK_PM_BRASS = 1, LK_PM_WALNUT, LK_PM_GLASS, LK_PM_STEEL, LK_PM_BLACK };
+
+static int lk_prop_mat(int mid)
+{
+	return mid == MID_DESK_BODY ? LK_PM_WALNUT : mid == MID_PROP_SHADE ? LK_PM_GLASS
+		: mid == MID_PROP_STEEL ? LK_PM_STEEL : mid == MID_CC_BAKELITE ? LK_PM_BLACK
+		: LK_PM_BRASS;
+}
+
+static bool lk_ray_sphere(vec3 o, vec3 d, vec3 c, double r, double *t0, double *t1)
+{
+	vec3 oc = vsub(o, c);
+	double b = vdot(oc, d), cc = vdot(oc, oc) - r * r, disc = b * b - cc;
+	if (disc < 0.0) {
+		return false;
+	}
+	double s = sqrt(disc);
+	*t0 = -b - s;
+	*t1 = -b + s;
+	return *t1 > 0.0;
+}
+
+/* the span of o + d t that can meet one of them */
+static bool lk_props_span(int props, vec3 o, vec3 d, double *a, double *b)
+{
+	*a = 1e30;
+	*b = -1e30;
+	double t0, t1;
+	if ((props & ROOM_PROP_LAMP) && lk_ray_sphere(o, d, vadd(prop_lamp_at(),
+		v3(0, 0.55 * PR_LAMP_S, 0.30 * PR_LAMP_S)), 1.50 * PR_LAMP_S, &t0, &t1)) {
+		*a = fmin(*a, t0);
+		*b = fmax(*b, t1);
+	}
+	if ((props & ROOM_PROP_BELL) && lk_ray_sphere(o, d, vadd(prop_bell_at(), v3(0, 0.5, 0)), 1.40,
+		&t0, &t1)) {
+		*a = fmin(*a, t0);
+		*b = fmax(*b, t1);
+	}
+	if ((props & ROOM_PROP_KNIFE) && lk_ray_sphere(o, d, v3(PR_KNIFE_X, 0.0, PR_KNIFE_Z),
+		PR_KNIFE_LEN * 0.5 + 0.45, &t0, &t1)) {
+		*a = fmin(*a, t0);
+		*b = fmax(*b, t1);
+	}
+	*a = fmax(*a, 0.0);
+	return *b > *a;
+}
+
+static hit3 lk_props_map(int props, vec3 p)
+{
+	hit3 h = { 1e9, 0 };
+	if (props & ROOM_PROP_KNIFE) {
+		h = hmin3(h, map_knife3(p));
+	}
+	if (props & ROOM_PROP_BELL) {
+		h = hmin3(h, map_bell3(p));
+	}
+	if (props & ROOM_PROP_LAMP) {
+		h = hmin3(h, map_lamp3(p));
+	}
+	return h;
+}
+
+static double lk_props_trace(int props, vec3 o, vec3 d, double tmax, int *mat, vec3 *n)
+{
+	double a, b;
+	if (!props || !lk_props_span(props, o, d, &a, &b) || a >= tmax) {
+		return tmax;
+	}
+	b = fmin(b, tmax);
+	double t = a;
+	for (int i = 0; i < 96 && t < b; i++) {
+		vec3 p = vadd(o, vmul(d, t));
+		hit3 h = lk_props_map(props, p);
+		if (h.d < 0.002) {
+			const double e = 0.002;
+			*n = vnorm(v3(
+				lk_props_map(props, vadd(p, v3(e, 0, 0))).d - lk_props_map(props, vsub(p, v3(e, 0, 0))).d,
+				lk_props_map(props, vadd(p, v3(0, e, 0))).d - lk_props_map(props, vsub(p, v3(0, e, 0))).d,
+				lk_props_map(props, vadd(p, v3(0, 0, e))).d - lk_props_map(props, vsub(p, v3(0, 0, e))).d));
+			*mat = lk_prop_mat(h.id);
+			return t;
+		}
+		t += fmax(h.d * 0.9, 0.0015);
+	}
+	return tmax;
+}
+
+/* how much of the room's lamp reaches p past them: a soft shadow */
+static double lk_props_shadow(int props, vec3 p, vec3 lp)
+{
+	vec3 d = vsub(lp, p);
+	double dist = vlen(d);
+	d = vmul(d, 1.0 / dist);
+	double a, b;
+	if (!props || !lk_props_span(props, p, d, &a, &b)) {
+		return 1.0;
+	}
+	double res = 1.0, t = fmax(a, 0.02);
+	b = fmin(b, dist);
+	for (int i = 0; i < 40 && t < b; i++) {
+		double h = lk_props_map(props, vadd(p, vmul(d, t))).d;
+		if (h < 0.001) {
+			return 0.0;
+		}
+		res = fmin(res, 10.0 * h / t);
+		t += clampf(h, 0.01, 0.40);
+	}
+	return clampf(res, 0.0, 1.0);
+}
+
+/* one of them, lit: by the room's lamp with their own shadows, the room all
+ * round, a highlight toward the eye the walk ends at; the shade glowing
+ * when the lamp is on */
+static vec3 lk_prop_colour(const struct lk_room *rm, vec3 p, vec3 n, int mat)
+{
+	vec3 alb, spec_col = v3(0.04, 0.04, 0.04), emit = v3(0, 0, 0);
+	double metal = 0.0, shin = 24.0;
+	switch (mat) {
+	case LK_PM_WALNUT:
+		alb = v3(0.25, 0.135, 0.07);
+		shin = 30.0;
+		break;
+	case LK_PM_GLASS:
+		alb = v3(0.030, 0.150, 0.055);
+		spec_col = v3(0.10, 0.10, 0.10);
+		shin = 120.0;
+		if (rm->props & ROOM_PROP_LIT) {
+			emit = vmul(v3(0.05, 0.30, 0.11), n.y < 0.0 ? 1.6 : 0.55);
+		}
+		break;
+	case LK_PM_STEEL:
+		alb = v3(0.10, 0.10, 0.11);
+		spec_col = v3(0.78, 0.80, 0.84);
+		metal = 1.0;
+		shin = 90.0;
+		break;
+	case LK_PM_BLACK:
+		alb = v3(0.030, 0.026, 0.024);
+		spec_col = v3(0.05, 0.05, 0.05);
+		shin = 20.0;
+		break;
+	default:
+		alb = v3(0.20, 0.14, 0.05);
+		spec_col = v3(0.86, 0.64, 0.30);
+		metal = 1.0;
+		shin = 46.0;
+		break;
+	}
+	vec3 lp = ROOM_LAMP_POS;
+	vec3 l = vnorm(vsub(lp, p));
+	double nol = fmax(vdot(n, l), 0.0);
+	double sh = nol > 0.0 ? lk_props_shadow(rm->props, vadd(p, vmul(n, 0.01)), lp) : 0.0;
+	vec3 v = vnorm(vsub(rm->proj[0].cam.eye, p));
+	vec3 hv = vnorm(vadd(l, v));
+	double sp = pow(fmax(vdot(n, hv), 0.0), shin) * (shin + 8.0) / 25.0;
+	/* what a metal shows of the room all round: the wall and the desk */
+	double up = 0.5 + 0.5 * n.y;
+	vec3 env = vadd(vmul(v3(0.30, 0.20, 0.12), 1.0 - up), vmul(rm->wall, up));
+	vec3 c = vmul(alb, 0.30 + 1.10 * nol * sh);
+	c = vadd(c, vmul(spec_col, sp * sh * 0.9));
+	c = vadd(c, vmul(vmul3(spec_col, env), 0.35 + 0.65 * metal));
+	return vadd(tonemap(c), emit);
+}
+
 static double lk_room_trace(const struct lk_room *rm, vec3 o, vec3 d, double tmax, int *kind,
 	vec3 *n)
 {
@@ -33416,6 +33592,14 @@ static double lk_room_trace(const struct lk_room *rm, vec3 o, vec3 d, double tma
 			*kind = rm->box[i].kind;
 			*n = lk_face_n(f);
 		}
+	}
+	int mat;
+	vec3 pn;
+	double tp = lk_props_trace(rm->props, o, d, best, &mat, &pn);
+	if (tp < best) {
+		best = tp;
+		*kind = LK_RM_PROPK + mat;
+		*n = pn;
 	}
 	return best;
 }
@@ -34631,6 +34815,16 @@ static void lk_material(const struct lk_scene *sc, const struct lk_hit *h, vec3 
 static vec3 lk_room_colour(const struct lk_scene *sc, vec3 p, vec3 n, int kind, int *sub)
 {
 	const struct lk_room *rm = &sc->room;
+	if (kind >= LK_RM_PROPK) {
+		*sub = 20 + kind - LK_RM_PROPK;
+		return lk_prop_colour(rm, p, n, kind - LK_RM_PROPK);
+	}
+	/* on the desk top, their shadows -- where the picture it comes from
+	 * did not have them in it (only the bookcase's view traced them) */
+	double psh = 1.0;
+	if (rm->props && kind == LK_RM_DESK && n.y > 0.5) {
+		psh = 0.35 + 0.65 * lk_props_shadow(rm->props, vadd(p, v3(0, 0.005, 0)), ROOM_LAMP_POS);
+	}
 	for (int k = 0; k < 3; k++) {
 		const struct lk_proj *pj = &rm->proj[k];
 		double u, v;
@@ -34652,7 +34846,8 @@ static vec3 lk_room_colour(const struct lk_scene *sc, vec3 p, vec3 n, int kind, 
 		double a;
 		double px = pj->x0 + u * pj->sw, py = pj->y0 + v * pj->sh;
 		*sub = k;
-		return lk_tex_at(&pj->tex, px / pj->tex.w, py / pj->tex.h, true, &a);
+		vec3 c = lk_tex_at(&pj->tex, px / pj->tex.w, py / pj->tex.h, true, &a);
+		return k == 0 ? c : vmul(c, psh);
 	}
 	*sub = 2 + kind;
 	/* made: walnut for the desk and the case, the walls in the colour they
@@ -34727,7 +34922,7 @@ static vec3 lk_room_colour(const struct lk_scene *sc, vec3 p, vec3 n, int kind, 
 	k *= 0.70 + 0.30 * smoothstepf(0.0, 6.0, p.y - rm->fy);
 	if (kind != LK_RM_SHELL || n.y > 0.5) {
 		/* wood is made in light; shown, it wants the curve the pictures went through */
-		return tonemap(vmul(c, k * 0.9));
+		return tonemap(vmul(c, k * 0.9 * psh));
 	}
 	return vmul(c, 0.75 + 0.25 * k);
 }
@@ -34879,44 +35074,6 @@ static void lk_scene_for(struct lk_scene *sc, int w, int h, const struct desk_lo
 
 static void lk_tex_of(struct lk_tex *t, cairo_surface_t *s);
 
-/* The desk from above as the door's walk sees it: the traced top with what
- * stands on it drawn over it as the screen has it -- the knife by the
- * carving, the bell, the reading lamp -- so they do not vanish when the eye
- * pulls back to the door. Kept, the last two of them: the scene being
- * walked holds the one it was built with. */
-static cairo_surface_t *lk_desk_top(struct room_render *rr, int w, int h)
-{
-	static cairo_surface_t *made[2];
-	struct room_xf xf;
-	if (!room_xform(w, h, 0.0, &xf) || xf.scale <= 0.0) {
-		return rr->background;
-	}
-	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, rr->w, rr->h);
-	if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
-		cairo_surface_destroy(s);
-		return rr->background;
-	}
-	cairo_t *cr = cairo_create(s);
-	cairo_set_source_surface(cr, rr->background, 0, 0);
-	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-	cairo_paint(cr);
-	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-	/* screen pixels to the sheet's */
-	cairo_scale(cr, 1.0 / xf.scale, 1.0 / xf.scale);
-	cairo_translate(cr, -xf.ox, -xf.oy);
-	knife_paint(cr, w, h, 0.0);
-	bell_paint(cr, w, h, 0.0);
-	dlamp_paint(cr, w, h, 0.0);
-	cairo_destroy(cr);
-	cairo_surface_flush(s);
-	if (made[0]) {
-		cairo_surface_destroy(made[0]);
-	}
-	made[0] = made[1];
-	made[1] = s;
-	return s;
-}
-
 /* The room, from the room tracer's own numbers, put behind the front door;
  * and end, the camera at the end of the walk. False if there is no room
  * up yet, or no picture of where the walk ends. */
@@ -34965,24 +35122,8 @@ static bool lk_room_build(struct lk_room *rm, int w, int h, int view, cairo_surf
 	/* the post box on the desk */
 	LK_RM_BOX(RM_PB_CX - RM_PB_HX, 0.0, RM_PB_CZ - RM_PB_HZ, RM_PB_CX + RM_PB_HX,
 		RM_PB_SHOULDER + RM_PB_CAP_T, RM_PB_CZ + RM_PB_HZ, LK_RM_POST);
-	/* what stands on the desk (map_props3): the lamp's shade, and its foot
-	 * and stem; the bell's block, and its dome. The pictures are laid on
-	 * them as on the post box -- the view the walk ends on has them traced
-	 * in the round, the desk from above has them as the desk view draws
-	 * them -- so they stand up off the top as the eye walks back. The
-	 * knife lies flat: the top is its box. */
-	if (g_room_props & ROOM_PROP_LAMP) {
-		vec3 b = prop_lamp_at();
-		double s = PR_LAMP_S, cy = 0.92 * s, cz = b.z + 0.34 * s, R = 0.34 * s, L = 1.12 * s;
-		LK_RM_BOX(b.x - L, cy - 0.20 * R, cz - R, b.x + L, cy + R, cz + R, LK_RM_PROP);
-		LK_RM_BOX(b.x - 0.44 * s, 0.0, b.z - 0.44 * s, b.x + 0.44 * s, cy - 0.20 * R,
-			b.z + 0.44 * s, LK_RM_PROP);
-	}
-	if (g_room_props & ROOM_PROP_BELL) {
-		vec3 b = prop_bell_at();
-		LK_RM_BOX(b.x - 0.78, 0.0, b.z - 0.78, b.x + 0.78, 0.20, b.z + 0.78, LK_RM_PROP);
-		LK_RM_BOX(b.x - 0.55, 0.20, b.z - 0.55, b.x + 0.55, 1.09, b.z + 0.55, LK_RM_PROP);
-	}
+	/* what stands on the desk: traced in the round (lk_props_trace) */
+	rm->props = (g_room_props & ~ROOM_PROP_LIT) | (desk_lamp_lit() >= 0.5 ? ROOM_PROP_LIT : 0);
 	if (view == DESK_VIEW_CONSOLE) {
 		/* the Control Panel, out, as it is looked at */
 		double dz = cc_dz(1.0, aspect);
@@ -35017,13 +35158,12 @@ static bool lk_room_build(struct lk_room *rm, int w, int h, int view, cairo_surf
 	}
 	pj = &rm->proj[2];
 	pj->cam = plan;
-	cairo_surface_t *top = lk_desk_top(rr, w, h);
-	lk_tex_of(&pj->tex, top);
+	lk_tex_of(&pj->tex, rr->background);
 	pj->x0 = pj->y0 = 0.0;
 	pj->sw = pj->tex.w;
 	pj->sh = pj->tex.h;
 	pj->on = pj->tex.px != NULL;
-	rm->keep[0] = top;
+	rm->keep[0] = rr->background;
 	rm->wall = vmul(vadd(edge[2], edge[4]), 0.5);
 	rm->ceil = vmul(rm->wall, 0.55);
 	/* and the eye that took the first, in the street's metres */
@@ -35945,6 +36085,11 @@ static void lk_gpu_uniforms(struct door_gpu_frame *fr, const struct lk_scene *sc
 	door_gpu_f(fr, "u_rm_hi", 3, LK_RM_BOXES, bhi);
 	door_gpu_i(fr, "u_rm_kind", LK_RM_BOXES, bk);
 	F3("u_rm_desk", rm->desk_hx, rm->desk_z0, rm->desk_z1);
+	I1("u_dp_props", rm->props);
+	V3("u_dp_bell", prop_bell_at());
+	V3("u_dp_lamp", prop_lamp_at());
+	V3("u_dp_key", ROOM_LAMP_POS);
+	V3("u_dp_eye", rm->proj[0].cam.eye);
 	V3("u_rm_wall", rm->wall);
 	V3("u_rm_ceil", rm->ceil);
 	int pon[3];

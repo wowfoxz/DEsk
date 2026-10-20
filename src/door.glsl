@@ -1112,6 +1112,265 @@ void lk_door_hit(vec3 ro, vec3 rd, inout lk_hit h)
 }
 
 /* the nearest thing in the room along o + d t, from inside it (units) */
+
+/* ---- what stands on the desk, in the door's room ----
+ * draw.c's lk_props_*: the bell, the reading lamp and the knife traced in
+ * the round by the room tracer's own distance field (room.glsl's
+ * map_props3, to the number), lit by the room's lamp with their own soft
+ * shadows. u_dp_props: draw.c's ROOM_PROP_* bits, 4 the lamp lit now. */
+uniform int u_dp_props;
+uniform vec3 u_dp_bell, u_dp_lamp, u_dp_key, u_dp_eye;
+#define PR_LAMP_S 1.75
+#define PR_KNIFE_X (-6.75)
+#define PR_KNIFE_Z 4.55
+#define PR_KNIFE_LEN 4.00
+#define PR_KNIFE_ANG (-0.42)
+#define LK_RM_PROPK 100
+struct dp_hit {
+	float d;
+	int id;
+};
+dp_hit dp_min(dp_hit a, dp_hit b)
+{
+	return a.d < b.d ? a : b;
+}
+float dp_cyl_y(vec3 p, float r, float h)
+{
+	float d = length(p.xz) - r;
+	float dy = abs(p.y) - h;
+	return min(max(d, dy), 0.0) + length(max(vec2(d, dy), vec2(0.0)));
+}
+float dp_capsule(vec3 p, vec3 a, vec3 b, float r)
+{
+	vec3 pa = p - a, ba = b - a;
+	float h = clampf(dot(pa, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
+	return length(pa - ba * h) - r;
+}
+
+dp_hit dp_bell(vec3 p)
+{
+	dp_hit h = dp_hit(1e9, 0);
+	vec3 q = p - u_dp_bell;
+	float bound = length(q - vec3(0.0, 0.5, 0.0)) - 1.35;
+	if (bound > 1.0) {
+		return dp_hit(bound, 0);
+	}
+	h = dp_min(h, dp_hit(sd_round_box(q - vec3(0.0, 0.10, 0.0), vec3(0.78, 0.10, 0.78), 0.05),
+		2));
+	float R = 0.623, cy = 0.20 + 0.56 - R;
+	float dome = max(length(q - vec3(0.0, cy, 0.0)) - R, 0.20 - q.y);
+	float rr = length(q.xz);
+	if (q.y > 0.55) {
+		float ang = atan2f(q.z, q.x);
+		float ring = abs(rr - 0.21) - 0.028;
+		ring = max(ring, -(abs(ang) - 0.55));
+		float bar = sd_box(vec3(q.x - 0.13, 0.0, q.z - 0.04), vec3(0.08, 1.0, 0.026));
+		float g = min(ring, bar);
+		dome = max(dome, -max(g, -(q.y - (cy + R - 0.035))));
+	}
+	h = dp_min(h, dp_hit(dome, 1));
+	h = dp_min(h, dp_hit(dp_capsule(q, vec3(0.0, 0.70, 0.0), vec3(0.0, 0.90, 0.0), 0.04), 1));
+	h = dp_min(h, dp_hit(length(q - vec3(0.0, 0.94, 0.0)) - 0.15, 1));
+	return h;
+}
+
+dp_hit dp_lamp(vec3 p)
+{
+	dp_hit h = dp_hit(1e9, 0);
+	const float s = PR_LAMP_S;
+	vec3 q = p - u_dp_lamp;
+	float bound = length(q - vec3(0.0, 0.55 * s, 0.30 * s)) - 1.45 * s;
+	if (bound > 1.0) {
+		return dp_hit(bound, 0);
+	}
+	float foot = dp_cyl_y(q - vec3(0.0, 0.05 * s, 0.0), 0.44 * s - 0.04, 0.05 * s - 0.04) - 0.04;
+	foot = min(foot, dp_cyl_y(q - vec3(0.0, 0.13 * s, 0.0), 0.20 * s, 0.04 * s) - 0.02);
+	h = dp_min(h, dp_hit(foot, 1));
+	float cy = 0.92 * s, cz = 0.34 * s, R = 0.34 * s, L = 1.12 * s;
+	vec3 sp = q - vec3(0.0, cy, cz);
+	float ryz = length(sp.yz);
+	float shade = max(max(ryz - R, abs(sp.x) - L), -(sp.y + 0.20 * R));
+	shade = max(shade, -max(ryz - (R - 0.06), abs(sp.x) - (L - 0.06)));
+	h = dp_min(h, dp_hit(shade, 3));
+	float rim = max(abs(ryz - R) - 0.035, abs(abs(sp.x) - L + 0.02) - 0.035);
+	rim = max(rim, -(sp.y + 0.20 * R));
+	h = dp_min(h, dp_hit(rim, 1));
+	h = dp_min(h, dp_hit(dp_capsule(q, vec3(0.0, 0.15 * s, 0.0), vec3(0.0, cy - 0.55 * R, cz * 0.7),
+		0.055 * s), 1));
+	float kx = 0.66 * L, kz = cz + 0.85 * R;
+	vec3 top = vec3(kx, cy - 0.40 * R, kz), drop = vec3(kx, 0.30 * s, kz + 0.20 * s);
+	h = dp_min(h, dp_hit(dp_capsule(q, top, drop, 0.014 * s), 1));
+	h = dp_min(h, dp_hit(dp_capsule(q, drop, drop - vec3(0.0, 0.08 * s, 0.0), 0.035 * s), 1));
+	return h;
+}
+
+dp_hit dp_knife(vec3 p)
+{
+	dp_hit h = dp_hit(1e9, 0);
+	float dx = p.x - PR_KNIFE_X, dz = p.z - PR_KNIFE_Z;
+	float bound = sqrt(dx * dx + dz * dz + p.y * p.y) - (PR_KNIFE_LEN * 0.5 + 0.4);
+	if (bound > 1.0) {
+		return dp_hit(bound, 0);
+	}
+	float ca = cos(PR_KNIFE_ANG), sa = sin(PR_KNIFE_ANG), hl = PR_KNIFE_LEN * 0.5;
+	float u = dx * ca - dz * sa, v = dx * sa + dz * ca;
+	float b0 = -hl + PR_KNIFE_LEN * (1.0 - 0.58);
+	float t = clampf((hl - u) / (hl - b0), 0.0, 1.0);
+	float hw = 0.17 * sqrt(t);
+	float off = 0.03 * (1.0 - t);
+	float blade = abs(v - off) - hw;
+	blade = max(blade, max(b0 - u, u - hl));
+	float th = 0.035 * clampf(0.35 + 0.65 * (0.5 - (v - off) / max(hw * 2.0, 1e-3)), 0.2, 1.0);
+	blade = max(blade, abs(p.y - 0.035) - th);
+	h = dp_min(h, dp_hit(blade, 4));
+	h = dp_min(h, dp_hit(sd_round_box(vec3(u - (b0 - 0.03), p.y - 0.07, v), vec3(0.055, 0.07, 0.39),
+		0.02), 5));
+	float g0 = -hl + 0.10, g1 = b0 - 0.09, gc = (g0 + g1) * 0.5, gh = (g1 - g0) * 0.5;
+	float grip = sd_round_box(vec3(u - gc, p.y - 0.10, v), vec3(gh, 0.10, 0.15), 0.09);
+	float rib = 0.012 * cos((u - g0) * 2.0 * M_PI / 0.18);
+	h = dp_min(h, dp_hit(grip + rib, 5));
+	h = dp_min(h, dp_hit(dp_cyl_y(vec3(u - (-hl + 0.10), p.y - 0.10, v), 0.15, 0.09) - 0.02,
+		4));
+	return h;
+}
+
+dp_hit dp_map(vec3 p)
+{
+	dp_hit h = dp_hit(1e9, 0);
+	if ((u_dp_props & 8) != 0) {
+		h = dp_min(h, dp_knife(p));
+	}
+	if ((u_dp_props & 1) != 0) {
+		h = dp_min(h, dp_bell(p));
+	}
+	if ((u_dp_props & 2) != 0) {
+		h = dp_min(h, dp_lamp(p));
+	}
+	return h;
+}
+
+void dp_sphere(vec3 o, vec3 d, vec3 c, float r, inout float a, inout float b)
+{
+	vec3 oc = o - c;
+	float bb = dot(oc, d), disc = bb * bb - (dot(oc, oc) - r * r);
+	if (disc < 0.0) {
+		return;
+	}
+	float s = sqrt(disc);
+	if (-bb + s <= 0.0) {
+		return;
+	}
+	a = min(a, -bb - s);
+	b = max(b, -bb + s);
+}
+
+bool dp_span(vec3 o, vec3 d, out float a, out float b)
+{
+	a = 1e30;
+	b = -1e30;
+	if ((u_dp_props & 2) != 0) {
+		dp_sphere(o, d, u_dp_lamp + vec3(0.0, 0.55 * PR_LAMP_S, 0.30 * PR_LAMP_S), 1.50 * PR_LAMP_S, a, b);
+	}
+	if ((u_dp_props & 1) != 0) {
+		dp_sphere(o, d, u_dp_bell + vec3(0.0, 0.5, 0.0), 1.40, a, b);
+	}
+	if ((u_dp_props & 8) != 0) {
+		dp_sphere(o, d, vec3(PR_KNIFE_X, 0.0, PR_KNIFE_Z), PR_KNIFE_LEN * 0.5 + 0.45, a, b);
+	}
+	a = max(a, 0.0);
+	return b > a;
+}
+
+float dp_trace(vec3 o, vec3 d, float tmax, inout int mat, inout vec3 n)
+{
+	float a, b;
+	if (u_dp_props == 0 || !dp_span(o, d, a, b) || a >= tmax) {
+		return tmax;
+	}
+	b = min(b, tmax);
+	float t = a;
+	for (int i = 0; i < 96 && t < b; i++) {
+		vec3 p = o + d * t;
+		dp_hit h = dp_map(p);
+		if (h.d < 0.002) {
+			const float e = 0.002;
+			n = normalize(vec3(
+				dp_map(p + vec3(e, 0, 0)).d - dp_map(p - vec3(e, 0, 0)).d,
+				dp_map(p + vec3(0, e, 0)).d - dp_map(p - vec3(0, e, 0)).d,
+				dp_map(p + vec3(0, 0, e)).d - dp_map(p - vec3(0, 0, e)).d));
+			mat = h.id;
+			return t;
+		}
+		t += max(h.d * 0.9, 0.0015);
+	}
+	return tmax;
+}
+
+float dp_shadow(vec3 p, vec3 lp)
+{
+	vec3 d = lp - p;
+	float dist = length(d);
+	d /= dist;
+	float a, b;
+	if (u_dp_props == 0 || !dp_span(p, d, a, b)) {
+		return 1.0;
+	}
+	float res = 1.0, t = max(a, 0.02);
+	b = min(b, dist);
+	for (int i = 0; i < 40 && t < b; i++) {
+		float h = dp_map(p + d * t).d;
+		if (h < 0.001) {
+			return 0.0;
+		}
+		res = min(res, 10.0 * h / t);
+		t += clampf(h, 0.01, 0.40);
+	}
+	return clampf(res, 0.0, 1.0);
+}
+
+vec3 dp_colour(vec3 p, vec3 n, int mat)
+{
+	vec3 alb, spec_col = vec3(0.04), emit = vec3(0.0);
+	float metal = 0.0, shin = 24.0;
+	if (mat == 2) {
+		alb = vec3(0.25, 0.135, 0.07);
+		shin = 30.0;
+	} else if (mat == 3) {
+		alb = vec3(0.030, 0.150, 0.055);
+		spec_col = vec3(0.10);
+		shin = 120.0;
+		if ((u_dp_props & 4) != 0) {
+			emit = vec3(0.05, 0.30, 0.11) * (n.y < 0.0 ? 1.6 : 0.55);
+		}
+	} else if (mat == 4) {
+		alb = vec3(0.10, 0.10, 0.11);
+		spec_col = vec3(0.78, 0.80, 0.84);
+		metal = 1.0;
+		shin = 90.0;
+	} else if (mat == 5) {
+		alb = vec3(0.030, 0.026, 0.024);
+		spec_col = vec3(0.05);
+		shin = 20.0;
+	} else {
+		alb = vec3(0.20, 0.14, 0.05);
+		spec_col = vec3(0.86, 0.64, 0.30);
+		metal = 1.0;
+		shin = 46.0;
+	}
+	vec3 l = normalize(u_dp_key - p);
+	float nol = max(dot(n, l), 0.0);
+	float sh = nol > 0.0 ? dp_shadow(p + n * 0.01, u_dp_key) : 0.0;
+	vec3 v = normalize(u_dp_eye - p);
+	vec3 hv = normalize(l + v);
+	float sp = pow(max(dot(n, hv), 0.0), shin) * (shin + 8.0) / 25.0;
+	float up = 0.5 + 0.5 * n.y;
+	vec3 env = vec3(0.30, 0.20, 0.12) * (1.0 - up) + u_rm_wall * up;
+	vec3 c = alb * (0.30 + 1.10 * nol * sh);
+	c += spec_col * (sp * sh * 0.9);
+	c += spec_col * env * (0.35 + 0.65 * metal);
+	return tonemap(c) + emit;
+}
+
 float lk_room_trace(vec3 o, vec3 d, float tmax, inout int kind, inout vec3 n)
 {
 	float best = tmax;
@@ -1139,6 +1398,14 @@ float lk_room_trace(vec3 o, vec3 d, float tmax, inout int kind, inout vec3 n)
 			kind = u_rm_kind[i];
 			n = lk_face_n(f);
 		}
+	}
+	int mat = 0;
+	vec3 pn = n;
+	float tp = dp_trace(o, d, best, mat, pn);
+	if (tp < best) {
+		best = tp;
+		kind = LK_RM_PROPK + mat;
+		n = pn;
 	}
 	return best;
 }
@@ -2395,6 +2662,14 @@ void lk_material(lk_hit h, vec3 p, inout lk_mat m)
  * else made here -- walnut, the walls' colour, under the room's lamp. */
 vec3 lk_room_colour(vec3 p, vec3 n, int kind, inout int sub)
 {
+	if (kind >= LK_RM_PROPK) {
+		sub = 20 + kind - LK_RM_PROPK;
+		return dp_colour(p, n, kind - LK_RM_PROPK);
+	}
+	float psh = 1.0;
+	if (u_dp_props != 0 && kind == LK_RM_DESK && n.y > 0.5) {
+		psh = 0.35 + 0.65 * dp_shadow(p + vec3(0.0, 0.005, 0.0), u_dp_key);
+	}
 	for (int k = 0; k < 3; k++) {
 		float u, v;
 		if (u_pj_on[k] == 0 || !lk_project_room(k, p, u, v) || u < 0.0 || u > 1.0 || v < 0.0
@@ -2416,7 +2691,8 @@ vec3 lk_room_colour(vec3 p, vec3 n, int kind, inout int sub)
 		float px = u_pj_rect[k].x + u * u_pj_rect[k].z, py = u_pj_rect[k].y + v * u_pj_rect[k].w;
 		sub = k;
 		vec2 ts = vec2(lk_tex_size(TX_PJ0 + k));
-		return lk_tex_at(TX_PJ0 + k, px / ts.x, py / ts.y, true, a);
+		vec3 tc = lk_tex_at(TX_PJ0 + k, px / ts.x, py / ts.y, true, a);
+		return k == 0 ? tc : tc * psh;
 	}
 	sub = 2 + kind;
 	/* made: walnut for the desk and the case, the walls in the colour they
@@ -2491,7 +2767,7 @@ vec3 lk_room_colour(vec3 p, vec3 n, int kind, inout int sub)
 	k *= 0.70 + 0.30 * smoothstepf(0.0, 6.0, p.y - u_rm_shell.y);
 	if (kind != LK_RM_SHELL || n.y > 0.5) {
 		/* wood is made in light; shown, it wants the curve the pictures went through */
-		return tonemap(vmul(c, k * 0.9));
+		return tonemap(vmul(c, k * 0.9 * psh));
 	}
 	return vmul(c, 0.75 + 0.25 * k);
 }
