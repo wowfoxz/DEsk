@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <GLES3/gl3.h>
 
@@ -133,14 +135,133 @@ static bool compile(GLuint sh, const char *src, char *err, size_t errsz)
 	return ok != 0;
 }
 
+/* ---- the programs kept on disk ----
+ *
+ * Building the door's programs takes the driver half a minute and more the
+ * first time, which is longer than a logout lasts: the door was traced on
+ * the CPU, coarse and slow, the whole way out. So once built each program
+ * is kept as the driver's own binary (glGetProgramBinary) in
+ * ~/.cache/desk/door-<hash>.bin, the hash over its text and the driver's
+ * name and version, and handed back next time (glProgramBinary) -- a
+ * fraction of a second. A binary the driver will not take is built again.
+ * DESK_DOOR_NO_CACHE=1: always built. */
+static uint64_t fnv(uint64_t h, const char *s)
+{
+	for (; s && *s; s++) {
+		h = (h ^ (unsigned char)*s) * 1099511628211ull;
+	}
+	return h;
+}
+
+static bool cache_path(const char *frag, char *path, size_t n)
+{
+	if (getenv("DESK_DOOR_NO_CACHE")) {
+		return false;
+	}
+	const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+	char dir[768];
+	if (xdg && *xdg) {
+		snprintf(dir, sizeof dir, "%s/desk", xdg);
+	} else if (home && *home) {
+		snprintf(dir, sizeof dir, "%s/.cache/desk", home);
+	} else {
+		return false;
+	}
+	mkdir(dir, 0755);
+	uint64_t h = 14695981039346656037ull;
+	h = fnv(h, (const char *)glGetString(GL_VENDOR));
+	h = fnv(h, (const char *)glGetString(GL_RENDERER));
+	h = fnv(h, (const char *)glGetString(GL_VERSION));
+	h = fnv(h, VERT_SRC);
+	h = fnv(h, frag);
+	snprintf(path, n, "%s/door-%016llx.bin", dir, (unsigned long long)h);
+	return true;
+}
+
+static GLuint cache_load(const char *path)
+{
+	FILE *f = fopen(path, "rbe");
+	if (!f) {
+		return 0;
+	}
+	GLenum fmt = 0;
+	long len = 0;
+	if (fread(&fmt, sizeof fmt, 1, f) != 1 || fseek(f, 0, SEEK_END) != 0
+		|| (len = ftell(f) - (long)sizeof fmt) <= 0 || fseek(f, sizeof fmt, SEEK_SET) != 0) {
+		fclose(f);
+		return 0;
+	}
+	void *bin = malloc((size_t)len);
+	bool ok = bin && fread(bin, 1, (size_t)len, f) == (size_t)len;
+	fclose(f);
+	GLuint prog = 0;
+	if (ok) {
+		prog = glCreateProgram();
+		glProgramBinary(prog, fmt, bin, (GLsizei)len);
+		GLint linked = 0;
+		glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+		if (!linked) {
+			glDeleteProgram(prog);
+			prog = 0;
+			unlink(path);
+		}
+	}
+	free(bin);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+	return prog;
+}
+
+static void cache_save(GLuint prog, const char *path)
+{
+	GLint len = 0;
+	glGetProgramiv(prog, GL_PROGRAM_BINARY_LENGTH, &len);
+	if (len <= 0) {
+		return;
+	}
+	void *bin = malloc((size_t)len);
+	GLenum fmt = 0;
+	GLsizei got = 0;
+	if (bin) {
+		glGetProgramBinary(prog, len, &got, &fmt, bin);
+	}
+	if (bin && got > 0) {
+		char tmp[1100];
+		snprintf(tmp, sizeof tmp, "%s.tmp", path);
+		FILE *f = fopen(tmp, "wbe");
+		if (f) {
+			bool ok = fwrite(&fmt, sizeof fmt, 1, f) == 1
+				&& fwrite(bin, 1, (size_t)got, f) == (size_t)got;
+			ok = fclose(f) == 0 && ok;
+			if (ok) {
+				rename(tmp, path);
+			} else {
+				unlink(tmp);
+			}
+		}
+	}
+	free(bin);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+}
+
+static int g_cached;   /* how many of the programs came off the disk */
+
 static GLuint link_prog(const char *frag, char *err, size_t errsz)
 {
+	char cpath[1024];
+	bool cache = cache_path(frag, cpath, sizeof cpath);
+	GLuint prog = cache ? cache_load(cpath) : 0;
+	if (prog) {
+		g_cached++;
+		goto ready;
+	}
 	GLuint vs = glCreateShader(GL_VERTEX_SHADER), fs = glCreateShader(GL_FRAGMENT_SHADER);
-	GLuint prog = 0;
 	if (compile(vs, VERT_SRC, err, errsz) && compile(fs, frag, err, errsz)) {
 		prog = glCreateProgram();
 		glAttachShader(prog, vs);
 		glAttachShader(prog, fs);
+		glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
 		glLinkProgram(prog);
 		GLint linked = 0;
 		glGetProgramiv(prog, GL_LINK_STATUS, &linked);
@@ -154,6 +275,10 @@ static GLuint link_prog(const char *frag, char *err, size_t errsz)
 	}
 	glDeleteShader(vs);
 	glDeleteShader(fs);
+	if (prog && cache) {
+		cache_save(prog, cpath);
+	}
+ready:
 	if (prog) {
 		glUseProgram(prog);
 		GLint loc = glGetUniformLocation(prog, "u_in0");
@@ -519,7 +644,8 @@ static void *door_thread(void *arg)
 		snprintf(D.why, sizeof D.why, "could not set up its textures");
 		goto dead;
 	}
-	snprintf(D.why, sizeof D.why, "compiled in %.2f s", now_s() - t0);
+	snprintf(D.why, sizeof D.why, "%s in %.2f s", g_cached ? "programs off the disk cache"
+		: "compiled", now_s() - t0);
 	pthread_mutex_lock(&D.lock);
 	D.state = DOOR_GPU_READY;
 	pthread_cond_broadcast(&D.cond);
