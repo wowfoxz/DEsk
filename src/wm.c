@@ -22979,6 +22979,13 @@ int main(int argc, char **argv)
 		desk_room_gpu_prefer(rnode);
 		free(rnode);
 	}
+	/* The front door's programs, built now on their own thread (or taken
+	 * off the disk cache), so that a logout finds them ready: started only
+	 * at the logout, a first build outlasted the walk to the door, and all
+	 * of it was traced on the CPU -- coarse and slow. */
+	if (!server.on_cpu) {
+		desk_lock_gpu_warm();
+	}
 	server.allocator = wlr_allocator_autocreate(server.backend, server.renderer);
 	if (server.allocator == NULL) {
 		wlr_log(WLR_ERROR, "failed to create allocator");
