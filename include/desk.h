@@ -1060,6 +1060,7 @@ enum desk_ovl {
 	DESK_OVL_SLIPS,       /* the tray's slips, under the Control Panel */
 	DESK_OVL_BELL,        /* the bell on the tray (shell.conf's bell) */
 	DESK_OVL_LAMP,        /* the reading lamp on the tray (shell.conf's lamp) */
+	DESK_OVL_KNIFE,       /* the knife lying by the carving */
 	DESK_OVL_COUNT,
 };
 uint64_t desk_overlay_key(int which, time_t now, int unread);
