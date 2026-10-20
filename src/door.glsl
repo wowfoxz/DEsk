@@ -2660,7 +2660,13 @@ void lk_material(lk_hit h, vec3 p, inout lk_mat m)
 /* What a point in the room looks like: the picture of it, from the first
  * camera that saw it (in its frame, facing it, nothing in between), or
  * else made here -- walnut, the walls' colour, under the room's lamp. */
+uniform float u_dp_night;
+vec3 lk_room_colour0(vec3 p, vec3 n, int kind, inout int sub);
 vec3 lk_room_colour(vec3 p, vec3 n, int kind, inout int sub)
+{
+	return lk_room_colour0(p, n, kind, sub) * u_dp_night;
+}
+vec3 lk_room_colour0(vec3 p, vec3 n, int kind, inout int sub)
 {
 	if (kind >= LK_RM_PROPK) {
 		sub = 20 + kind - LK_RM_PROPK;
@@ -2685,6 +2691,25 @@ vec3 lk_room_colour(vec3 p, vec3 n, int kind, inout int sub)
 		vec3 nn;
 		float th = lk_room_trace(u_pj_eye[k], vmul(d, 1.0 / dist), dist + 1.0, kk, nn);
 		if (th < dist - 0.10) {
+			/* draw.c: the wood just in front of a prop in the bookcase's picture */
+			if (k == 0 && kk >= LK_RM_PROPK && kind == LK_RM_DESK && n.y > 0.5) {
+				for (int s = 1; s <= 16; s++) {
+					vec3 q = p + vec3(0.0, 0.0, 0.2 * float(s));
+					vec3 dq = q - u_pj_eye[k];
+					float dl = length(dq);
+					if (!lk_project_room(k, q, u, v) || u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
+						break;
+					}
+					if (lk_room_trace(u_pj_eye[k], dq / dl, dl + 1.0, kk, nn) < dl - 0.10) {
+						continue;
+					}
+					float a;
+					float px = u_pj_rect[k].x + u * u_pj_rect[k].z, py = u_pj_rect[k].y + v * u_pj_rect[k].w;
+					sub = k;
+					vec2 ts = vec2(lk_tex_size(TX_PJ0 + k));
+					return lk_tex_at(TX_PJ0 + k, px / ts.x, py / ts.y, true, a) * psh;
+				}
+			}
 			continue;   /* something stood between it and the camera */
 		}
 		float a;

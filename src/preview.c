@@ -974,6 +974,10 @@ int main(int argc, char **argv)
 		desk_apps_init(false);
 		desk_draw_shelf(cr, w, h, 3, 1.0, -1);
 		desk_draw_shelf_gadgets(cr, w, h, time(NULL));
+		/* the reading lamp off: the compositor's dark over the room */
+		if (desk_lamp_lit() < 0.999) {
+			desk_draw_lamp_night(cr, w, h, 1.0 - desk_lamp_lit());
+		}
 	} else {
 		desk_draw_desktop(cr, w, h, time(NULL), demo, drawer);
 	}

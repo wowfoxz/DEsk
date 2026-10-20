@@ -2274,11 +2274,12 @@ mtl icon_material(int id, vec3 pw)
 	}
 	case MID_PROP_SHADE: {
 		vec3 tint = vec3(0.060, 0.330, 0.120);
-		m.albedo = tint * 0.32;
+		bool lit = (u_props & 4) != 0;
+		m.albedo = tint * (lit ? 0.32 : 0.10);
 		m.rough = 0.06;
 		m.coat = 1.0;
 		m.coat_rough = 0.03;
-		m.emit = (u_props & 4) != 0 ? tint * 0.55 : tint * 0.02;
+		m.emit = lit ? tint * 0.55 : vec3(0.0);
 		break;
 	}
 	case MID_GADGET_PAPER: {

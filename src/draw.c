@@ -3878,11 +3878,12 @@ static void icon_material(int kind, int id, vec3 p, struct mtl *m)
 		/* green cased glass over opal: dark and glossy outside, and with
 		 * the lamp on, glowing through */
 		vec3 tint = v3(0.060, 0.330, 0.120);
-		m->albedo = vmul(tint, 0.32);
+		bool lit = (g_room_props & ROOM_PROP_LIT) != 0;
+		m->albedo = vmul(tint, lit ? 0.32 : 0.10);
 		m->rough = 0.06;
 		m->coat = 1.0;
 		m->coat_rough = 0.03;
-		m->emit = (g_room_props & ROOM_PROP_LIT) ? vmul(tint, 0.55) : vmul(tint, 0.02);
+		m->emit = lit ? vmul(tint, 0.55) : v3(0, 0, 0);
 		break;
 	}
 	case MID_GADGET_PAPER: {
@@ -30824,6 +30825,8 @@ static struct {
 void desk_lamp_set(double lit, double lift, double pull)
 {
 	g_dlamp.lit = clampf(lit, 0.0, 1.0);
+	/* the room tracer's lamp shade glows, and lights, as the lamp is */
+	g_room_props = g_dlamp.lit >= 0.5 ? (g_room_props | ROOM_PROP_LIT) : (g_room_props & ~ROOM_PROP_LIT);
 	g_dlamp.lift = clampf(lift, 0.0, 1.0);
 	g_dlamp.pull = clampf(pull, 0.0, 1.0);
 }
@@ -32298,6 +32301,7 @@ struct lk_room {
 	double wx, fy, cy, bz, fz;  /* the walls: x within +-wx, floor, ceiling, back, front */
 	struct { vec3 lo, hi; int kind; } box[LK_RM_BOXES];
 	int props;                  /* what stands on the desk (ROOM_PROP_*), the lamp as lit */
+	double night;               /* 1, down to 0.4 with the reading lamp off */
 	int nbox;
 	double desk_hx, desk_z0, desk_z1;
 	struct lk_proj proj[3];     /* the view the walk ends on; the bookcase as traced (if that
@@ -34812,7 +34816,13 @@ static void lk_material(const struct lk_scene *sc, const struct lk_hit *h, vec3 
 /* What a point in the room looks like: the picture of it, from the first
  * camera that saw it (in its frame, facing it, nothing in between), or
  * else made here -- walnut, the walls' colour, under the room's lamp. */
+static vec3 lk_room_colour0(const struct lk_scene *sc, vec3 p, vec3 n, int kind, int *sub);
 static vec3 lk_room_colour(const struct lk_scene *sc, vec3 p, vec3 n, int kind, int *sub)
+{
+	/* the reading lamp off: the room down as the desk goes down */
+	return vmul(lk_room_colour0(sc, p, n, kind, sub), sc->room.night);
+}
+static vec3 lk_room_colour0(const struct lk_scene *sc, vec3 p, vec3 n, int kind, int *sub)
 {
 	const struct lk_room *rm = &sc->room;
 	if (kind >= LK_RM_PROPK) {
@@ -34841,6 +34851,29 @@ static vec3 lk_room_colour(const struct lk_scene *sc, vec3 p, vec3 n, int kind, 
 		vec3 nn;
 		double th = lk_room_trace(rm, pj->cam.eye, vmul(d, 1.0 / dist), dist + 1.0, &kk, &nn);
 		if (th < dist - 0.10) {
+			/* the bookcase's picture has one of the props over this bit
+			 * of the desk: the wood just in front of it there, which the
+			 * picture does have, with its shadow on, rather than the desk
+			 * from above in another light (a patch behind the lamp) */
+			if (k == 0 && kk >= LK_RM_PROPK && kind == LK_RM_DESK && n.y > 0.5) {
+				for (int s = 1; s <= 16; s++) {
+					vec3 q = vadd(p, v3(0.0, 0.0, 0.2 * s));
+					vec3 dq = vsub(q, pj->cam.eye);
+					double dl = vlen(dq);
+					if (!room_project(&pj->cam, q, &u, &v) || u < 0.0 || u > 1.0 || v < 0.0
+						|| v > 1.0) {
+						break;
+					}
+					if (lk_room_trace(rm, pj->cam.eye, vmul(dq, 1.0 / dl), dl + 1.0, &kk, &nn)
+						< dl - 0.10) {
+						continue;
+					}
+					double a;
+					double px = pj->x0 + u * pj->sw, py = pj->y0 + v * pj->sh;
+					*sub = k;
+					return vmul(lk_tex_at(&pj->tex, px / pj->tex.w, py / pj->tex.h, true, &a), psh);
+				}
+			}
 			continue;   /* something stood between it and the camera */
 		}
 		double a;
@@ -35124,6 +35157,7 @@ static bool lk_room_build(struct lk_room *rm, int w, int h, int view, cairo_surf
 		RM_PB_SHOULDER + RM_PB_CAP_T, RM_PB_CZ + RM_PB_HZ, LK_RM_POST);
 	/* what stands on the desk: traced in the round (lk_props_trace) */
 	rm->props = (g_room_props & ~ROOM_PROP_LIT) | (desk_lamp_lit() >= 0.5 ? ROOM_PROP_LIT : 0);
+	rm->night = 1.0 - 0.6 * (1.0 - desk_lamp_lit());
 	if (view == DESK_VIEW_CONSOLE) {
 		/* the Control Panel, out, as it is looked at */
 		double dz = cc_dz(1.0, aspect);
@@ -36086,6 +36120,7 @@ static void lk_gpu_uniforms(struct door_gpu_frame *fr, const struct lk_scene *sc
 	door_gpu_i(fr, "u_rm_kind", LK_RM_BOXES, bk);
 	F3("u_rm_desk", rm->desk_hx, rm->desk_z0, rm->desk_z1);
 	I1("u_dp_props", rm->props);
+	F1("u_dp_night", rm->night);
 	V3("u_dp_bell", prop_bell_at());
 	V3("u_dp_lamp", prop_lamp_at());
 	V3("u_dp_key", ROOM_LAMP_POS);
