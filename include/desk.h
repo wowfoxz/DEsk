@@ -790,7 +790,9 @@ void desk_draw_desktop(cairo_t *cr, int w, int h, time_t now, bool with_demo_win
  * Whatever has been put there, in a row: one of the five things the drawer
  * has always had (look 0..DESK_DOCK_COUNT-1, in DRAWER_ITEMS' order), a
  * card with a program's mark on it, or a sheet folded away. */
-enum { DESK_LOOK_CARD = DESK_DOCK_COUNT, DESK_LOOK_PACKET };
+enum { DESK_LOOK_CARD = DESK_DOCK_COUNT, DESK_LOOK_PACKET,
+	DESK_LOOK_HANDHELD   /* a handheld console (shell.conf drawer_apps): its icon is the thing */
+};
 struct desk_drawer_item {
 	int look;
 	cairo_surface_t *icon;     /* a card: the program's icon, or NULL */
@@ -802,6 +804,9 @@ struct desk_drawer_item {
 /* The row, in room units across the drawer, 0 its middle: slot k's middle
  * in a row of m, how far apart they are, and how big a thing is drawn in a
  * row that full (1 while they fit at their own size). */
+/* desk-preview: things laid in the drawer after the five it comes with
+ * (the compositor lays its own row) */
+void desk_preview_drawer_extra(const struct desk_drawer_item *items, int n);
 double desk_drawer_slot_x(int k, int m);
 double desk_drawer_pitch(int m);
 double desk_drawer_fit(int m);

@@ -780,7 +780,7 @@ static int write_lock(const char *path, int w, int h)
 	"[--closed] [--apps] [--shelf] [--console] [--post] [--sounds DIR] [--calendar] " \
 	"[--memo] [--lock] [--boot[=u,u,...]] [--agenda] [--book] [--book-anim[=u,u,...]] " \
 	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]] [--bell[=hot|press]] " \
-	"[--lamp[=on|off|hot|pull]]\n"
+	"[--lamp[=on|off|hot|pull]] [--consoles]\n"
 
 int main(int argc, char **argv)
 {
@@ -826,6 +826,27 @@ int main(int argc, char **argv)
 				strcmp(how, "hot") == 0 ? 1.0 : 0.0, strcmp(how, "pull") == 0 ? 1.0 : 0.0);
 		} else if (strcmp(argv[i], "--closed") == 0) {
 			drawer = 0.0;
+		} else if (strcmp(argv[i], "--consoles") == 0) {
+			/* the handheld consoles shell.conf's drawer_apps lays in the
+			 * drawer, after the five it comes with */
+			static struct desk_drawer_item con[2];
+			const char *home = getenv("HOME");
+			const char *f[2] = { "d2-survivors", "wow-aethus" };
+			const char *nm[2] = { "D2 Survivors", "WoW Aethus" };
+			int nc = 0;
+			for (int k = 0; k < 2; k++) {
+				char pth[512];
+				snprintf(pth, sizeof pth, "%s/.local/share/desk/%s.png", home ? home : "", f[k]);
+				cairo_surface_t *ic = cairo_image_surface_create_from_png(pth);
+				if (cairo_surface_status(ic) != CAIRO_STATUS_SUCCESS) {
+					continue;
+				}
+				con[nc] = (struct desk_drawer_item){ .look = DESK_LOOK_HANDHELD, .icon = ic,
+					.seed = 31u + 17u * (unsigned)k };
+				snprintf(con[nc].name, sizeof con[nc].name, "%s", nm[k]);
+				nc++;
+			}
+			desk_preview_drawer_extra(con, nc);
 		} else if (strcmp(argv[i], "--shelf") == 0) {
 			shelf = true;
 		} else if (strcmp(argv[i], "--console") == 0) {

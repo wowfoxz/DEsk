@@ -12391,7 +12391,7 @@ static double drawer_item_height(const struct desk_drawer_item *it)
 	if (it->look >= 0 && it->look < DESK_DOCK_COUNT) {
 		return TOOL_HEIGHT[it->look];
 	}
-	return it->look == DESK_LOOK_PACKET ? 0.12 : 0.03;
+	return it->look == DESK_LOOK_PACKET ? 0.12 : it->look == DESK_LOOK_HANDHELD ? 0.24 : 0.03;
 }
 
 /* How lit the felt is at (x, y) on the drawer sheet, against its middle:
@@ -12498,6 +12498,55 @@ static cairo_surface_t *drawer_item_image(struct room_render *rr, const struct d
 		cairo_set_source_surface(cr, it->packet, 0, 0);
 		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
 		cairo_paint(cr);
+		cairo_destroy(cr);
+		cairo_surface_flush(img);
+		*ax = *ay = diag * 0.5;
+		return img;
+	}
+	if (it->look == DESK_LOOK_HANDHELD && it->icon) {
+		/* a handheld console lying face up: its icon is its face, cut out
+		 * of a slab as thick as one -- the edge darker under the face,
+		 * a sheen over the top left, as the drawer's lamp falls on it */
+		double iw = cairo_image_surface_get_width(it->icon);
+		double ih = cairo_image_surface_get_height(it->icon);
+		double side = 2.05 * ppu, k = side / fmax(iw, ih);
+		double w = iw * k, h = ih * k, th = fmax(0.10 * ppu, 1.5);
+		double diag = hypot(w, h) + th + 6.0;
+		cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+			(int)ceil(diag), (int)ceil(diag));
+		cairo_t *cr = cairo_create(img);
+		cairo_translate(cr, diag * 0.5, diag * 0.5 - th * 0.5);
+		cairo_rotate(cr, turn * 1.6);
+		cairo_translate(cr, -w * 0.5, -h * 0.5);
+		int steps = (int)ceil(th);
+		for (int i = steps; i >= 1; i--) {
+			double sh = 0.16 + 0.10 * (1.0 - (double)i / steps);
+			cairo_save(cr);
+			cairo_translate(cr, 0, th * i / steps);
+			cairo_scale(cr, k, k);
+			cairo_set_source_rgba(cr, sh, sh * 0.92, sh * 0.85, 1.0);
+			cairo_mask_surface(cr, it->icon, 0, 0);
+			cairo_restore(cr);
+		}
+		cairo_save(cr);
+		cairo_scale(cr, k, k);
+		cairo_set_source_surface(cr, it->icon, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+		cairo_paint(cr);
+		cairo_restore(cr);
+		cairo_pattern_t *g = cairo_pattern_create_linear(0, 0, w, h);
+		cairo_pattern_add_color_stop_rgba(g, 0.0, 1, 1, 1, 0.22);
+		cairo_pattern_add_color_stop_rgba(g, 0.45, 1, 1, 1, 0.0);
+		cairo_pattern_add_color_stop_rgba(g, 1.0, 0, 0, 0, 0.18);
+		cairo_save(cr);
+		cairo_scale(cr, k, k);
+		cairo_matrix_t m;
+		cairo_matrix_init_scale(&m, 1.0 / k, 1.0 / k);
+		cairo_pattern_set_matrix(g, &m);
+		cairo_set_source(cr, g);
+		cairo_mask_surface(cr, it->icon, 0, 0);
+		cairo_restore(cr);
+		cairo_pattern_destroy(g);
 		cairo_destroy(cr);
 		cairo_surface_flush(img);
 		*ax = *ay = diag * 0.5;
@@ -23573,6 +23622,17 @@ void desk_draw_room_placeholder(cairo_t *cr, int w, int h)
 	room_placeholder(cr, w, h);
 }
 
+static struct desk_drawer_item g_pv_extra[4];
+static int g_pv_extra_n;
+
+void desk_preview_drawer_extra(const struct desk_drawer_item *items, int n)
+{
+	g_pv_extra_n = n < 0 ? 0 : n > 4 ? 4 : n;
+	for (int i = 0; i < g_pv_extra_n; i++) {
+		g_pv_extra[i] = items[i];
+	}
+}
+
 void desk_draw_room(cairo_t *cr, int w, int h, double drawer_open)
 {
 	struct room_xf xf;
@@ -23609,7 +23669,17 @@ void desk_draw_room(cairo_t *cr, int w, int h, double drawer_open)
 			xs[i] = desk_drawer_slot_x(i, DESK_DOCK_COUNT);
 			fits[i] = desk_drawer_fit(DESK_DOCK_COUNT);
 		}
-		desk_drawer_paint_items(cr, w, h, items, DESK_DOCK_COUNT, xs, fits, -1);
+		int m = DESK_DOCK_COUNT + g_pv_extra_n;
+		struct desk_drawer_item all[DESK_DOCK_COUNT + 4];
+		double ax2[DESK_DOCK_COUNT + 4], af2[DESK_DOCK_COUNT + 4];
+		for (int i = 0; i < m; i++) {
+			all[i] = i < DESK_DOCK_COUNT ? items[i] : g_pv_extra[i - DESK_DOCK_COUNT];
+			ax2[i] = desk_drawer_slot_x(i, m);
+			af2[i] = desk_drawer_fit(m);
+		}
+		(void)xs;
+		(void)fits;
+		desk_drawer_paint_items(cr, w, h, all, m, ax2, af2, -1);
 	}
 	cairo_restore(cr);
 

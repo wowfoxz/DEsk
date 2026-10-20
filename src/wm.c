@@ -214,6 +214,7 @@ struct shell_conf {
 	                             * and the head bobs walking: 1 as made, 0 none */
 	bool clock_12h;
 	char language[16];          /* "auto", "en", "ja", "zh", ... */
+	char drawer_apps[512];      /* desktop file ids put in the drawer as handheld consoles */
 	bool drawer_closes;         /* the drawer goes back after something is used */
 	bool take_sheet;            /* ALL APPS: the sheet is carried down for the window */
 	bool fold_drawer;           /* a folded window goes into the drawer */
@@ -4244,6 +4245,8 @@ static void book_press(struct desk_server *server, double x, double y)
 
 static bool drawer_has_app(const struct desk_server *server, const char *id);
 static void drawer_keep_app(struct desk_server *server, const char *id, bool keep);
+static void drawer_conf_apps(struct desk_server *server);
+static bool drawer_conf_has(const struct desk_server *server, const char *id);
 
 static void bnc_reset(struct desk_server *server)
 {
@@ -10104,6 +10107,12 @@ static void shell_conf_defaults(struct shell_conf *c)
 /* The settings that are not yes or no. False if the key is not one. */
 static bool conf_other(struct shell_conf *c, const char *path, const char *key, const char *val)
 {
+	if (!strcmp(key, "drawer_apps")) {
+		/* programs that lie in the drawer as the handheld consoles their
+		 * icons are: "drawer_apps = wow-aethus.desktop, d2-survivors.desktop" */
+		snprintf(c->drawer_apps, sizeof c->drawer_apps, "%s", val);
+		return true;
+	}
 	if (!strcmp(key, "graphics")) {
 		static const char *const LEVEL[DESK_GFX_COUNT] = { "2d", "low", "medium", "high",
 			"ultra" };
@@ -10655,6 +10664,7 @@ static void shell_conf_poll(struct desk_server *server)
 	desk_occasion_conf(&oc);
 	bell_publish(server);
 	lamp_publish(server);
+	drawer_conf_apps(server);
 	if (!first && locked(server)) {
 		paint_lock(server);
 		server_schedule_frames(server);
@@ -11181,7 +11191,9 @@ static void drawer_item_of(const struct desk_server *server, const struct desk_a
 				first = !(oa && oa->model == app->model);
 			}
 		}
-		if (first) {
+		if (drawer_conf_has(server, e->id) && (it->icon = desk_app_icon(app))) {
+			it->look = DESK_LOOK_HANDHELD;
+		} else if (first) {
 			it->look = app->model;
 		} else {
 			it->icon = desk_app_icon(app);
@@ -11384,6 +11396,49 @@ static bool drawer_has_app(const struct desk_server *server, const char *id)
 	}
 	const struct drawer_entry *c = &server->drw_carry;
 	return server->drw_carrying && c->kind == DRAWER_APP && strcmp(c->id, id) == 0;
+}
+
+/* shell.conf's drawer_apps: is id one of them */
+static bool drawer_conf_has(const struct desk_server *server, const char *id)
+{
+	const char *s = server->conf.drawer_apps;
+	size_t n = strlen(id);
+	while (*s) {
+		while (*s == ' ' || *s == '\t' || *s == ',') {
+			s++;
+		}
+		size_t len = strcspn(s, ", \t");
+		if (len == n && strncmp(s, id, n) == 0) {
+			return true;
+		}
+		s += len;
+	}
+	return false;
+}
+
+/* And put in the drawer, each once, when the list is new to us: taken out
+ * by hand, one stays out until shell.conf's list changes. */
+static void drawer_conf_apps(struct desk_server *server)
+{
+	static char done[512];
+	if (strcmp(done, server->conf.drawer_apps) == 0) {
+		return;
+	}
+	snprintf(done, sizeof done, "%s", server->conf.drawer_apps);
+	const char *s = done;
+	while (*s) {
+		while (*s == ' ' || *s == '\t' || *s == ',') {
+			s++;
+		}
+		size_t len = strcspn(s, ", \t");
+		if (len > 0 && len < 96) {
+			char id[96];
+			memcpy(id, s, len);
+			id[len] = '\0';
+			drawer_keep_app(server, id, true);
+		}
+		s += len;
+	}
 }
 
 /* A program put in the drawer, after the programs already there -- or
