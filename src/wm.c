@@ -108,6 +108,8 @@
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
@@ -636,6 +638,14 @@ struct desk_server {
 	struct wl_listener new_input;
 	struct wl_listener request_cursor;
 	struct wl_listener pointer_focus_change;
+	/* games: relative motion and the pointer held still (or kept inside)
+	 * while a program has it locked -- without these Xwayland fakes a lock
+	 * by warping, and the view runs away at the screen's edges */
+	struct wlr_relative_pointer_manager_v1 *relative_pointer;
+	struct wlr_pointer_constraints_v1 *pointer_constraints;
+	struct wlr_pointer_constraint_v1 *active_constraint;
+	struct wl_listener new_constraint;
+	struct wl_listener constraint_destroy;
 	/* Typing into programs' windows through the input method (text-input,
 	 * ti_*): the windows' text inputs, the one the input method is typing
 	 * into, and for each key whether it is waiting on the input method's
@@ -19590,10 +19600,13 @@ static void seat_request_cursor(struct wl_listener *listener, void *data)
 	}
 }
 
+static void constraint_check_focus(struct desk_server *server);
+
 static void seat_pointer_focus_change(struct wl_listener *listener, void *data)
 {
 	struct desk_server *server = wl_container_of(listener, server, pointer_focus_change);
 	struct wlr_seat_pointer_focus_change_event *event = data;
+	constraint_check_focus(server);
 	if (event->new_surface == NULL) {
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 	}
@@ -20370,10 +20383,77 @@ static void pointer_over_paper(struct desk_server *server, uint32_t time)
 	}
 }
 
+static void constraint_set_active(struct desk_server *server,
+	struct wlr_pointer_constraint_v1 *c)
+{
+	if (server->active_constraint == c) {
+		return;
+	}
+	if (server->active_constraint) {
+		wl_list_remove(&server->constraint_destroy.link);
+		wlr_pointer_constraint_v1_send_deactivated(server->active_constraint);
+	}
+	server->active_constraint = c;
+	if (c) {
+		wl_signal_add(&c->events.destroy, &server->constraint_destroy);
+		wlr_pointer_constraint_v1_send_activated(c);
+	}
+}
+
+/* the constraint, if any, of the surface the pointer is over */
+static void constraint_check_focus(struct desk_server *server)
+{
+	struct wlr_surface *s = server->seat->pointer_state.focused_surface;
+	struct wlr_pointer_constraint_v1 *c = s && server->pointer_constraints
+		? wlr_pointer_constraints_v1_constraint_for_surface(
+			server->pointer_constraints, s, server->seat)
+		: NULL;
+	constraint_set_active(server, c);
+}
+
+static void constraint_destroyed(struct wl_listener *listener, void *data)
+{
+	struct desk_server *server = wl_container_of(listener, server, constraint_destroy);
+	(void)data;
+	wl_list_remove(&server->constraint_destroy.link);
+	server->active_constraint = NULL;
+}
+
+static void constraint_new(struct wl_listener *listener, void *data)
+{
+	struct desk_server *server = wl_container_of(listener, server, new_constraint);
+	struct wlr_pointer_constraint_v1 *c = data;
+	if (c->seat == server->seat
+		&& c->surface == server->seat->pointer_state.focused_surface) {
+		constraint_set_active(server, c);
+	}
+}
+
 static void server_cursor_motion(struct wl_listener *listener, void *data)
 {
 	struct desk_server *server = wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
+	if (server->relative_pointer) {
+		wlr_relative_pointer_manager_v1_send_relative_motion(server->relative_pointer,
+			server->seat, (uint64_t)event->time_msec * 1000,
+			event->delta_x, event->delta_y, event->unaccel_dx, event->unaccel_dy);
+	}
+	struct wlr_pointer_constraint_v1 *c = server->active_constraint;
+	if (c && c->surface == server->seat->pointer_state.focused_surface) {
+		if (c->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
+			/* held still: the program has the motion as relative only */
+			input_seen(server, "the pointer");
+			wlr_seat_pointer_notify_frame(server->seat);
+			return;
+		}
+		/* confined: no motion that would take it out of the region */
+		double nx = server->seat->pointer_state.sx + event->delta_x;
+		double ny = server->seat->pointer_state.sy + event->delta_y;
+		if (!pixman_region32_contains_point(&c->region, (int)floor(nx), (int)floor(ny), NULL)) {
+			input_seen(server, "the pointer");
+			return;
+		}
+	}
 	wlr_cursor_move(server->cursor, &event->pointer->base, event->delta_x, event->delta_y);
 	input_seen(server, "the pointer");
 	process_cursor_motion(server, event->time_msec);
@@ -23228,6 +23308,11 @@ int main(int argc, char **argv)
 	wl_signal_add(&server.seat->keyboard_state.events.focus_change, &server.kb_focus_change);
 	server.request_cursor.notify = seat_request_cursor;
 	wl_signal_add(&server.seat->events.request_set_cursor, &server.request_cursor);
+	server.relative_pointer = wlr_relative_pointer_manager_v1_create(server.wl_display);
+	server.pointer_constraints = wlr_pointer_constraints_v1_create(server.wl_display);
+	server.constraint_destroy.notify = constraint_destroyed;
+	server.new_constraint.notify = constraint_new;
+	wl_signal_add(&server.pointer_constraints->events.new_constraint, &server.new_constraint);
 	server.pointer_focus_change.notify = seat_pointer_focus_change;
 	wl_signal_add(&server.seat->pointer_state.events.focus_change, &server.pointer_focus_change);
 	server.request_set_selection.notify = seat_request_set_selection;
